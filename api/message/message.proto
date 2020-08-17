@@ -1,0 +1,185 @@
+syntax = "proto3";
+
+package message;
+
+message order {
+  string Id = 1;
+  string Address = 2;
+  uint64 Price = 3;
+  string Hash = 4;
+  string Signature = 5;
+  string Ciphertext = 6;
+  string Tradename = 7;
+  string Region = 8;
+}
+
+message Tx {
+  uint64 Nonce = 1;
+  uint64 Amount = 2;
+  string From = 3;
+  string To = 4;
+  string Hash = 5;
+  string Signature = 6;
+  int64 Time = 7;
+  string script = 8;
+  order order = 9;
+}
+
+message res_tx { repeated Tx Txs = 1; }
+
+message req_tx { string address = 1; }
+
+message req_tx_by_hash { string hash = 1; }
+message resp_tx_by_hash {
+  int32 code = 1;
+  string message = 2;
+  Tx data = 3;
+}
+
+message req_balance { string address = 1; }
+message res_balance { uint64 balnce = 1; }
+
+message req_block_by_number { uint64 height = 1; }
+message req_block_by_hash { string hash = 1; }
+
+message resp_block {
+  uint64 Height = 1;
+  string PrevBlockHash = 2;
+  repeated Tx Txs = 3;
+  string Root = 4;
+  uint64 Version = 5;
+  int64 Timestamp = 6;
+  string Hash = 7;
+  string Miner = 8;
+}
+
+message respose_txs { repeated Tx txs = 1; }
+
+message respose_nonce { uint64 nonce = 1; }
+
+message req_nonce { string address = 1; }
+
+message req_transaction {
+  string From = 1;
+  string To = 2;
+  uint64 Amount = 3;
+  uint64 Nonce = 4;
+  string Priv = 5;
+  string message = 6;
+  order Order = 7;
+}
+message res_transaction { string Hash = 1; }
+
+message req_transactions { repeated req_transaction txs = 1; }
+message resp_transactions { repeated string hashList = 1; }
+
+message req_signed_transaction {
+  string from = 1;
+  string to = 2;
+  uint64 amount = 3;
+  uint64 nonce = 4;
+  int64 time = 5;
+  bytes hash = 6;
+  bytes signature = 7;
+}
+message resp_signed_transaction { string hash = 1; }
+
+message req_signed_transactions { repeated req_signed_transaction txs = 1; }
+message resp_signed_transactions { repeated string hashList = 1; }
+
+message req_create_addr {}
+message resp_create_addr {
+  string address = 1;
+  string privkey = 2;
+}
+
+message req_max_block_number {}
+message resp_max_block_number { uint64 maxNumber = 1; }
+
+message req_addr_by_priv { string priv = 1; }
+message resp_addr_by_priv { string addr = 1; }
+
+message req_sign_ord {
+  string priv = 1;
+  order Order = 2;
+}
+message resp_sign_ord {
+  string hash = 1;
+  string signature = 2;
+}
+
+message req_token_create {
+  string from = 1;
+  string to = 2;
+  uint64 amount = 3;
+  uint64 nonce = 4;
+  string priv = 5;
+  string symbol = 6;
+  uint64 total = 7;
+  uint64 fee = 8;
+}
+message resp_token_create { string hash = 1; }
+
+message req_token_balance {
+  string address = 1;
+  string symbol = 2;
+}
+message resp_token_balance { uint64 balnce = 1; }
+
+message req_token_transaction {
+  string from = 1;
+  string to = 2;
+  uint64 amount = 3;
+  uint64 nonce = 4;
+  string priv = 5;
+  uint64 tokenAmount = 6;
+  string symbol = 7;
+  uint64 fee = 8;
+}
+message resp_token_transaction { string hash = 1; }
+
+message simpleTransaction {
+  uint64 nonce = 1;
+  uint64 amount = 2;
+  string address = 3;
+  int64 time = 4;
+  string hash = 5;
+  string signature = 6;
+}
+message req_admin_transactions { repeated simpleTransaction txs = 2; }
+message resp_admin_transactions { repeated string hashList = 1; }
+
+message freezeBalance {
+  string address = 1;
+  uint64 balance = 2;
+  int32 state = 3;
+}
+message req_get_freeze_bal { repeated string addressList = 1; }
+message resp_get_freeze_bal { repeated freezeBalance results = 1; }
+
+service Greeter {
+  rpc GetBlockByNum(req_block_by_number) returns (resp_block) {}
+  rpc GetBlockByHash(req_block_by_hash) returns (resp_block) {}
+  rpc GetBalance(req_balance) returns (res_balance) {}
+  rpc GetTxsByAddr(req_tx) returns (respose_txs) {}
+  rpc GetTxByHash(req_tx_by_hash) returns (resp_tx_by_hash) {}
+  rpc SendTransaction(req_transaction) returns (res_transaction) {}
+  rpc SendTransactions(req_transactions) returns (resp_transactions) {}
+  rpc SendSignedTransaction(req_signed_transaction)
+      returns (resp_signed_transaction) {}
+  rpc SendSignedTransactions(req_signed_transactions)
+      returns (resp_signed_transactions) {}
+  rpc GetAddressNonceAt(req_nonce) returns (respose_nonce) {}
+  rpc CreateAddr(req_create_addr) returns (resp_create_addr) {}
+  rpc GetMaxBlockNumber(req_max_block_number) returns (resp_max_block_number) {}
+  rpc GetAddrByPriv(req_addr_by_priv) returns (resp_addr_by_priv) {}
+  rpc SignOrd(req_sign_ord) returns (resp_sign_ord) {}
+  rpc MintToken(req_token_create) returns (resp_token_create) {}
+  rpc CreateContract(req_token_create) returns (resp_token_create) {}
+  rpc GetBalanceToken(req_token_balance) returns (resp_token_balance) {}
+  rpc SendToken(req_token_transaction) returns (resp_token_transaction) {}
+  rpc FreezeBalance(req_admin_transactions) returns (resp_admin_transactions) {}
+  rpc UnfreezeBalance(req_admin_transactions)
+      returns (resp_admin_transactions) {}
+  rpc GetFreezeBalance(req_get_freeze_bal) returns (resp_get_freeze_bal) {}
+}

@@ -1,0 +1,47 @@
+logConfig:
+  level: "DEBUG"
+  filename: "./logs/kortholog.log"
+  maxSize: 100
+  maxAge: 10
+  maxBackups: 10
+  comperss: true
+
+apiConfig:
+  rpcConfig:
+    address: ":9701"
+    certFile: "./configs/server.crt"
+    keyFile: "./configs/server.key"
+    adminaddr: "Kto2YGvFKXQtSazWp9hPZyBrA9JPkxgNE6GW56o7jcdQXTq"
+    adminPriv: "YmrjFawyRbczN91WqQkQpEqr5GeVek4hFMrLEsQ9EuUGi2znJ12xS2EbUA1E5gz4yEMyZVMa1uEyz76UxGA1ZuD"
+  webConfig:
+    address: ":9702"
+
+p2pconfigList:
+- nodeName: "c"
+  bindPort: 9703
+  bindAddr: "127.0.0.1"
+  advertiseAddr: "127.0.0.1"
+  members: ["127.0.0.1:9503", "127.0.0.1:9603"]
+- nodeName: "c"
+  bindPort: 9703
+  bindAddr: "127.0.0.1"
+  advertiseAddr: "127.0.0.1"
+  members: ["127.0.0.1:9503", "127.0.0.1:9603"]
+
+bftConfig:
+  nodenum: 3
+  peers: ["127.0.0.1:9505", "127.0.0.1:9605"]
+  httpaddr: "127.0.0.1:9704"
+  nodeaddr: "127.0.0.1:9705"
+  countaddr: "KtoC5gP1TLyUWbHRkp1gfpMrbdBawnqxQi3NdYtB31dgtJE"
+  rpcaddr: "127.0.0.1:9706"
+  join: false
+  snapshotcount: 1000
+  snapshotinterval: 100
+  ds: "Kto3PYebE3gTorcqYf59uHc2PcCdoANzgvgmZXa21r559rR"
+  cm: "KtoD6ELKyafRZU9SDMKfDpRZdyjHugsdmTvDXTH1ED2SmBt"
+  qtj: "KtoBA91mi8mFEKnmQyZ698tXa5i89mesyXb2KvwoqyyRx21"
+  logdir: "./consensus"
+  snapdir: "./consensus"
+  logsdir: "./consensus/log"
+  stabledir: "./consensus/stable"

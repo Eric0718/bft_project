@@ -1,0 +1,132 @@
+1、通过地址获取余额
+POST http://127.0.0.1:12345/GetBalancebyAddr
+
+请求:
+{
+    "address":"xxx"
+}
+
+返回:
+{
+    "errorcode":0,
+    "errormsg":"ok",
+    "balance":0
+}
+
+2、获取某地址的所有交易
+PSOT http://127.0.0.1:12345/GetTxsbyAddr
+
+请求:
+{
+    "address":"xxx"
+}
+
+返回:
+{
+    "errorcode":0,
+    "errormsg":"ok",
+    "transactionlist":[
+        {
+            "nonce":123,
+            "blocknumber":123,
+	        "amount":123,
+	        "from":"xxx",
+	        "to":"xxx",
+            "hash":"xxx",
+	        "signature":"xxx",
+	        "time":123,
+	        "ord":{
+                "id":"xxx",
+	            "address":"xxx",
+	            "price":123,
+	            "hash":"xxx",
+	            "signature":"xxx",
+	            "ciphertext":"xxx"
+            }
+        },
+        ...
+    ]
+}
+
+3、通过哈希获取交易
+POST: http://127.0.0.1:12345/GetTxbyhash
+
+请求:
+{
+    "hash":"xxx"
+}
+
+返回:
+{
+    "errorcode":0,
+    "errormsg":"ok",
+    "transaction":{
+        "nonce":123,
+        "blocknumber":123,
+	    "amount":123,
+	    "from":"xxx",
+	    "to":"xxx",
+        "hash":"xxx",
+	    "signature":"xxx",
+	    "time":123,
+	    "ord":{
+            "id":"xxx",
+	        "address":"xxx",
+	        "price":123,
+	        "hash":"xxx",
+	        "signature":"xxx",
+	        "ciphertext":"xxx"
+        }
+    }  
+}
+
+4、通过块号获取块
+PSOT: http://127.0.0.1:12345/GetBlockbyNum
+
+请求:
+{
+    "num":123
+}
+
+返回:
+{
+    "errorcode":0,
+    "errormsg":"ok",
+    "block":{
+        "height":123,
+	    "prevblockhash":"xxx",
+	    "root":"xxx",
+	    "version":123,
+	    "timestamp":123,
+	    "hash":"xxx",
+        "miner":"xxx",
+        "txs":[
+            ...
+        ]
+    }
+}
+
+5、获取Nonce
+POST http://127.0.0.1:12345/GetNonce
+
+请求:
+{
+    "address":"xxx"
+}
+
+返回:
+{
+    "errorcode":0,
+    "errormsg":"ok",
+    "nonce":123
+}
+
+6、获取最新的块号
+GET http://127.0.0.1:12345/GetMaxBlockNum
+
+返回:
+{
+    "errorcode":0,
+    "errormsg":"ok",
+    "blocknumber":123
+}
