@@ -155,7 +155,7 @@ func (pool *TxPool) Pending(Bc blockchain.Blockchains) (readyTxs []*transaction.
 			avaliableBal = balance - frozenBal
 		}
 
-		if frozenBal, ok = avaliableBalMap[address.String()]; !ok {
+		if frozenBal, ok = frozenBalMap[address.String()]; !ok {
 			frozenBal, err = Bc.GetFreezeBalance(address.Bytes())
 			if err != nil {
 				logger.Error("failed to get frozen amount", zap.Error(err), zap.String("address", address.String()))
@@ -467,7 +467,8 @@ func verify(tx transaction.Transaction, bc blockchain.Blockchains) bool {
 			return false
 		}
 	} else if !tx.IsCoinBaseTransaction() {
-		logger.Error("wrong transaction type", zap.Uint16("tag", tx.Tag))
+		logger.Error("wrong transaction type", zap.Int32("tag", tx.Tag))
+		return false
 	}
 
 	return true

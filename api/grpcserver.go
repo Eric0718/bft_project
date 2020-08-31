@@ -81,12 +81,16 @@ func (g *Greeter) RunRPC() {
 func txToMsgTxAndOrder(tx *transaction.Transaction) (msgTx message.Tx) {
 	msgTx.Hash = hex.EncodeToString(tx.Hash)
 	msgTx.From = string(tx.From.Bytes())
+	msgTx.BlockNum = tx.BlockNumber
 	msgTx.Amount = tx.Amount
 	msgTx.Nonce = tx.Nonce
 	msgTx.To = string(tx.To.Bytes())
 	msgTx.Signature = hex.EncodeToString(tx.Signature)
 	msgTx.Time = tx.Time
 	msgTx.Script = tx.Script
+	msgTx.Fee = tx.Fee
+	msgTx.Root = tx.Root
+	msgTx.Tag = tx.Tag
 
 	if tx.IsOrderTransaction() {
 		msgTx.Order = &message.Order{}
@@ -114,6 +118,75 @@ func txToMsgTx(tx *transaction.Transaction) (msgTx message.Tx) {
 	return msgTx
 }
 
+//MsgTxToTx message tx to tx
+func MsgTxToTx(msgTx *message.Tx) (*transaction.Transaction, error) {
+	tx := &transaction.Transaction{}
+
+	hs, err := hex.DecodeString(msgTx.Hash)
+	if err != nil {
+		return nil, err
+	}
+	tx.Hash = hs
+
+	f, er := types.StringToAddress(msgTx.From)
+	if er != nil {
+		return nil, er
+	}
+	tx.From = *f
+
+	tx.BlockNumber = msgTx.BlockNum
+	tx.Amount = msgTx.Amount
+	tx.Nonce = msgTx.Nonce
+
+	t, err := types.StringToAddress(msgTx.To)
+	if err != nil {
+		return nil, err
+	}
+	tx.To = *t
+
+	sgt, err := hex.DecodeString(msgTx.Signature)
+	if err != nil {
+		return nil, err
+	}
+	tx.Signature = sgt
+
+	tx.Time = msgTx.Time
+	tx.Script = msgTx.Script
+	tx.Fee = msgTx.Fee
+	tx.Root = msgTx.Root
+	tx.Tag = msgTx.Tag
+
+	if msgTx.Order != nil && len(msgTx.Signature) > 0 {
+		tx.Order.ID = []byte(msgTx.Order.Id)
+
+		ad, err := types.StringToAddress(msgTx.Order.Address)
+		if err != nil {
+			return nil, err
+		}
+		tx.Order.Address = *ad
+
+		tx.Order.Price = msgTx.Order.Price
+
+		Ohs, err := hex.DecodeString(msgTx.Order.Hash)
+		if err != nil {
+			return nil, err
+		}
+		tx.Order.Hash = Ohs
+
+		sgt, err := hex.DecodeString(msgTx.Order.Signature)
+		if err != nil {
+			return nil, err
+		}
+		tx.Order.Signature = sgt
+
+		tx.Order.Ciphertext = []byte(msgTx.Order.Ciphertext)
+		tx.Order.Region = msgTx.Order.Region
+		tx.Order.Tradename = msgTx.Order.Tradename
+	}
+
+	return tx, nil
+}
+
 // GetBalance 根据传入的address获取，该address对应的余额
 func (g *Greeter) GetBalance(ctx context.Context, in *message.ReqBalance) (*message.ResBalance, error) {
 
@@ -135,7 +208,7 @@ func (g *Greeter) GetBlockByNum(ctx context.Context, in *message.ReqBlockByNumbe
 
 	var respdata message.RespBlock
 	for _, tx := range b.Transactions {
-		tmpTx := txToMsgTx(tx)
+		tmpTx := txToMsgTxAndOrder(tx)
 		respdata.Txs = append(respdata.Txs, &tmpTx)
 	}
 
@@ -160,7 +233,7 @@ func (g *Greeter) GetBlockByHash(ctx context.Context, in *message.ReqBlockByHash
 
 	var respdata message.RespBlock
 	for _, tx := range b.Transactions {
-		tmpTx := txToMsgTx(tx)
+		tmpTx := txToMsgTxAndOrder(tx)
 		respdata.Txs = append(respdata.Txs, &tmpTx)
 	}
 
@@ -292,32 +365,37 @@ func (g *Greeter) SendTransaction(ctx context.Context, in *message.ReqTransactio
 }
 
 // SendTransactions 批量发送交易，请先看SendTransaction
-func (g *Greeter) SendTransactions(ctx context.Context, in *message.ReqTransactions) (resp *message.RespTransactions, err error) {
+func (g *Greeter) SendTransactions(ctx context.Context, in *message.ReqTransactions) (*message.RespTransactions, error) {
+	var hashList []*message.HashMsg
 	for _, v := range in.Txs {
 		if v.From == v.To {
 			logger.Info("From and To are the same", zap.String("from", v.From), zap.String("to", v.To))
-			//return nil, grpc.Errorf(codes.InvalidArgument, "from:%s,to:%s", v.From, v.To)
+			msg := message.HashMsg{Code: -1, Message: "address cannot be the same", Hash: ""}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
 		from, err := types.StringToAddress(v.From)
 		if err != nil {
 			logger.Error("Parameters error", zap.String("from", v.From), zap.String("to", v.To))
-			//return nil, grpc.Errorf(codes.InvalidArgument, "from:%s,to:%s", v.From, v.To)
+			msg := message.HashMsg{Code: -1, Message: "invalid address", Hash: ""}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
 		to, err := types.StringToAddress(v.To)
 		if err != nil {
 			logger.Error("Parameters error", zap.String("from", v.From), zap.String("to", v.To))
-			//return nil, grpc.Errorf(codes.InvalidArgument, "from:%s,to:%s", v.From, v.To)
+			msg := message.HashMsg{Code: -1, Message: "invalid address", Hash: ""}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
 		priv := util.Decode(v.Priv)
 		if len(priv) != 64 {
 			logger.Info("private key", zap.String("privateKey", v.Priv))
-			//return nil, grpc.Errorf(codes.InvalidArgument, "private key:%s", v.Priv)
+			msg := message.HashMsg{Code: -1, Message: "invalid private key", Hash: ""}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
@@ -333,19 +411,22 @@ func (g *Greeter) SendTransactions(ctx context.Context, in *message.ReqTransacti
 				tx.Order.Ciphertext, err = hex.DecodeString(v.Order.Ciphertext)
 				if err != nil {
 					logger.Error("hex.DecodeString failed", zap.String("Order.Ciphertext", v.Order.Ciphertext))
-					// return nil, grpc.Errorf(codes.InvalidArgument, "order.Ciphertext")
+					msg := message.HashMsg{Code: -1, Message: "invalid order ciphertext", Hash: ""}
+					hashList = append(hashList, &msg)
 					continue
 				}
 				tx.Order.Hash, err = hex.DecodeString(v.Order.Hash)
 				if err != nil {
 					logger.Info("hex.DecodeString failed", zap.String("Order.Hash", v.Order.Hash))
-					//return nil, grpc.Errorf(codes.InvalidArgument, "Order.Hash:%s", v.Order.Hash)
+					msg := message.HashMsg{Code: -1, Message: "invalid order hash", Hash: ""}
+					hashList = append(hashList, &msg)
 					continue
 				}
 				tx.Order.Signature, err = hex.DecodeString(v.Order.Signature)
 				if err != nil {
 					logger.Info("hex.DecodeString failed", zap.String("Order.Signature", v.Order.Signature))
-					//return nil, grpc.Errorf(codes.InvalidArgument, "Order.Signature")
+					msg := message.HashMsg{Code: -1, Message: "invalid order signature", Hash: ""}
+					hashList = append(hashList, &msg)
 					continue
 				}
 				tx.Order.Region = v.Order.Region
@@ -356,16 +437,17 @@ func (g *Greeter) SendTransactions(ctx context.Context, in *message.ReqTransacti
 
 		if err := g.tp.Add(tx, g.Bc); err != nil {
 			logger.Error("failed to add txpool", zap.Error(err))
-			//return nil, grpc.Errorf(codes.InvalidArgument, "data error")
+			msg := message.HashMsg{Code: -1, Message: "failed to add txpool", Hash: hex.EncodeToString(tx.Hash)}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
 		g.n.Broadcast(tx)
-		resp.HashList = append(resp.HashList, hex.EncodeToString(tx.Hash))
-		//hash := hex.EncodeToString(tx.Hash)
+		msg := message.HashMsg{Code: 0, Message: "ok", Hash: hex.EncodeToString(tx.Hash)}
+		hashList = append(hashList, &msg)
 	}
 
-	return
+	return &message.RespTransactions{HashList: hashList}, nil
 }
 
 // SendSignedTransaction 将完整的交易发送到交易池，等待上链
@@ -417,21 +499,28 @@ func (g *Greeter) SendSignedTransaction(ctx context.Context, in *message.ReqSign
 
 // SendSignedTransactions 将完整的交易列表发送到交易池，等待上链
 func (g *Greeter) SendSignedTransactions(ctx context.Context, in *message.ReqSignedTransactions) (*message.RespSignedTransactions, error) {
+	var hashList []*message.HashMsg
 	for _, reqTx := range in.Txs {
 		if reqTx.From == reqTx.To {
 			logger.Info("From and To are the same", zap.String("from", reqTx.From), zap.String("to", reqTx.To))
+			msg := message.HashMsg{Code: -1, Message: "address cannot be the same", Hash: hex.EncodeToString(reqTx.Hash)}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
 		from, err := types.StringToAddress(reqTx.From)
 		if err != nil {
 			logger.Error("Parameters error", zap.String("from", reqTx.From), zap.String("to", reqTx.To))
+			msg := message.HashMsg{Code: -1, Message: "invalid address", Hash: hex.EncodeToString(reqTx.Hash)}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
 		to, err := types.StringToAddress(reqTx.To)
 		if err != nil {
 			logger.Error("Parameters error", zap.String("from", reqTx.From), zap.String("to", reqTx.To))
+			msg := message.HashMsg{Code: -1, Message: "invalid address", Hash: hex.EncodeToString(reqTx.Hash)}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
@@ -447,17 +536,24 @@ func (g *Greeter) SendSignedTransactions(ctx context.Context, in *message.ReqSig
 
 		if !tx.Verify() {
 			logger.Error("failed to verify transation", zap.Error(errors.New("signature verification failed")))
+			msg := message.HashMsg{Code: -1, Message: "sign verification failed", Hash: hex.EncodeToString(reqTx.Hash)}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
 		if err := g.tp.Add(tx, g.Bc); err != nil {
 			logger.Error("failed to add txpool", zap.Error(err))
+			msg := message.HashMsg{Code: -1, Message: "failed to add txpool", Hash: hex.EncodeToString(reqTx.Hash)}
+			hashList = append(hashList, &msg)
 			continue
 		}
 		g.n.Broadcast(tx)
+
+		msg := message.HashMsg{Code: 0, Message: "ok", Hash: hex.EncodeToString(reqTx.Hash)}
+		hashList = append(hashList, &msg)
 	}
 
-	return &message.RespSignedTransactions{}, nil
+	return &message.RespSignedTransactions{HashList: hashList}, nil
 }
 
 // CreateContract 创建代币合约，Symbol是代币名称，Total是发行总量，Fee所需交易费。
@@ -639,7 +735,8 @@ func (g *Greeter) GetMaxBlockNumber(ctx context.Context, in *message.ReqMaxBlock
 func (g *Greeter) GetAddrByPriv(ctx context.Context, in *message.ReqAddrByPriv) (*message.RespAddrByPriv, error) {
 	privBytes := util.Decode(in.Priv)
 	if len(privBytes) != 64 {
-		logger.Info("private key", zap.String("in.Priv", in.Priv))
+		logger.Error("private key", zap.String("in.Priv", in.Priv))
+		return nil, grpc.Errorf(codes.InvalidArgument, "wrong private key")
 	}
 	addr := util.PubtoAddr(privBytes[32:])
 	return &message.RespAddrByPriv{Addr: addr}, nil
@@ -678,33 +775,38 @@ func (g *Greeter) SignOrd(ctx context.Context, in *message.ReqSignOrd) (*message
 	return &message.RespSignOrd{Hash: Hash, Signature: Signature}, nil
 }
 
-// FreezeBalance 冻结To账户Amount数额的余额
-func (g *Greeter) FreezeBalance(ctx context.Context, in *message.ReqAdminTransactions) (*message.RespAdminTransactions, error) {
+// SendFreezeTransactions 冻结To账户Amount数额的余额
+func (g *Greeter) SendFreezeTransactions(ctx context.Context, in *message.ReqSignedTransactions) (*message.RespSignedTransactions, error) {
 	addr, err := types.StringToAddress(g.AdminAddr)
 	if err != nil {
 		logger.Error("Faile to change from", zap.String("from", g.AdminAddr))
 		return nil, grpc.Errorf(codes.InvalidArgument, "from:%s", g.AdminAddr)
 	}
-	var hashList []string
+	var hashList []*message.HashMsg
 	for _, freezeTx := range in.Txs {
-		to, err := types.StringToAddress(freezeTx.Address)
+		to, err := types.StringToAddress(freezeTx.To)
 		if err != nil {
-			logger.Error("Faile to Verify address", zap.Error(err), zap.String("address", freezeTx.Address))
-			//return nil, grpc.Errorf(codes.InvalidArgument, "to:%s", freezeTx.Address)
+			logger.Error("faile to verify address", zap.Error(err), zap.String("address", freezeTx.To))
+			msg := message.HashMsg{Code: -1, Message: "invalid address", Hash: hex.EncodeToString(freezeTx.Hash)}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
-		hash, err := hex.DecodeString(freezeTx.Hash)
-		if err != nil {
-			logger.Error("failed to decode hash", zap.Error(err), zap.String("address", freezeTx.Address))
-			continue
-		}
+		// hash, err := hex.DecodeString(freezeTx.Hash)
+		// if err != nil {
+		// 	logger.Error("failed to decode hash", zap.Error(err), zap.String("address", freezeTx.Address))
+		// 	continue
+		// }
 
-		signature, err := hex.DecodeString(freezeTx.Signature)
-		if err != nil {
-			logger.Error("failed to decode signature", zap.Error(err), zap.String("address", freezeTx.Address))
-			continue
-		}
+		hash := freezeTx.Hash
+
+		// signature, err := hex.DecodeString(freezeTx.Signature)
+		// if err != nil {
+		// 	logger.Error("failed to decode signature", zap.Error(err), zap.String("address", freezeTx.Address))
+		// 	continue
+		// }
+
+		signature := freezeTx.Signature
 
 		nonce := freezeTx.Nonce
 		tx := &transaction.Transaction{
@@ -718,53 +820,61 @@ func (g *Greeter) FreezeBalance(ctx context.Context, in *message.ReqAdminTransac
 			Tag:       transaction.FreezeTag,
 		}
 		if !tx.Verify() {
-			logger.Error("failed to verify transaction", zap.String("address", freezeTx.Address),
+			logger.Error("failed to verify transaction", zap.String("to", tx.To.String()),
 				zap.Uint64("amount", freezeTx.Amount))
+			msg := message.HashMsg{Code: -1, Message: "sign verification failed", Hash: hex.EncodeToString(freezeTx.Hash)}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
 		//tx := transaction.ZNewTransaction(nonce, freezeTx.Amount, *addr, *to, transaction.WithFreezeBalance())
 
 		if err := g.tp.Add(tx, g.Bc); err != nil {
-			logger.Error("Failed to add txpool", zap.Error(err), zap.String("to", freezeTx.Address),
+			logger.Error("Failed to add txpool", zap.Error(err), zap.String("to", tx.To.String()),
 				zap.Uint64("nonce", nonce), zap.Uint64("amount", freezeTx.Amount))
-			//return nil, grpc.Errorf(codes.Internal, "Please try again later")
+			msg := message.HashMsg{Code: -1, Message: "invalid parameter", Hash: hex.EncodeToString(freezeTx.Hash)}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
 		g.n.Broadcast(tx)
-		hashList = append(hashList, hex.EncodeToString(tx.Hash))
+		msg := message.HashMsg{Code: 0, Message: "ok", Hash: hex.EncodeToString(freezeTx.Hash)}
+		hashList = append(hashList, &msg)
 	}
-	return &message.RespAdminTransactions{HashList: hashList}, nil
+	return &message.RespSignedTransactions{HashList: hashList}, nil
 }
 
-// UnfreezeBalance 解冻address的amount数额的金额
-func (g *Greeter) UnfreezeBalance(ctx context.Context, in *message.ReqAdminTransactions) (*message.RespAdminTransactions, error) {
+// SendUnfreezeTransactions 解冻address的amount数额的金额
+func (g *Greeter) SendUnfreezeTransactions(ctx context.Context, in *message.ReqSignedTransactions) (*message.RespSignedTransactions, error) {
 	addr, err := types.StringToAddress(g.AdminAddr)
 	if err != nil {
 		logger.Error("Faile to change address", zap.String("address", g.AdminAddr))
 		return nil, grpc.Errorf(codes.InvalidArgument, "admin address:%s", g.AdminAddr)
 	}
-	var hashList []string
+	var hashList []*message.HashMsg
 	for _, unfreezeTx := range in.Txs {
-		to, err := types.StringToAddress(unfreezeTx.Address)
+		to, err := types.StringToAddress(unfreezeTx.To)
 		if err != nil {
-			logger.Error("Faile to Verify address", zap.Error(err), zap.String("to", unfreezeTx.Address))
-			//return nil, grpc.Errorf(codes.InvalidArgument, "to:%s", unfreezeTx.Address)
+			logger.Error("Faile to Verify address", zap.Error(err), zap.String("to", unfreezeTx.To))
+			msg := message.HashMsg{Code: -1, Message: "invalid address", Hash: hex.EncodeToString(unfreezeTx.Hash)}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
-		hash, err := hex.DecodeString(unfreezeTx.Hash)
-		if err != nil {
-			logger.Error("failed to decode hash", zap.Error(err), zap.String("address", unfreezeTx.Address))
-			continue
-		}
+		// hash, err := hex.DecodeString(unfreezeTx.Hash)
+		// if err != nil {
+		// 	logger.Error("failed to decode hash", zap.Error(err), zap.String("address", unfreezeTx.Address))
+		// 	continue
+		// }
+		hash := unfreezeTx.Hash
 
-		signature, err := hex.DecodeString(unfreezeTx.Signature)
-		if err != nil {
-			logger.Error("failed to decode signature", zap.Error(err), zap.String("address", unfreezeTx.Address))
-			continue
-		}
+		// signature, err := hex.DecodeString(unfreezeTx.Signature)
+		// if err != nil {
+		// 	logger.Error("failed to decode signature", zap.Error(err), zap.String("address", unfreezeTx.Address))
+		// 	continue
+		// }
+
+		signature := unfreezeTx.Signature
 
 		nonce := unfreezeTx.Nonce
 		tx := &transaction.Transaction{
@@ -777,24 +887,29 @@ func (g *Greeter) UnfreezeBalance(ctx context.Context, in *message.ReqAdminTrans
 			Signature: signature,
 			Tag:       transaction.UnfreezeTag,
 		}
+
 		if !tx.Verify() {
-			logger.Error("failed to verify transaction", zap.String("address", unfreezeTx.Address),
+			logger.Error("failed to verify transaction", zap.String("to", tx.To.String()),
 				zap.Uint64("amount", unfreezeTx.Amount))
+			msg := message.HashMsg{Code: -1, Message: "sign verification failed", Hash: hex.EncodeToString(unfreezeTx.Hash)}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
 		if err := g.tp.Add(tx, g.Bc); err != nil {
-			logger.Error("Failed to add txpool", zap.Error(err), zap.String("to", unfreezeTx.Address),
+			logger.Error("Failed to add txpool", zap.Error(err), zap.String("to", tx.To.String()),
 				zap.Uint64("nonce", nonce), zap.Uint64("amount", unfreezeTx.Amount))
-			//return nil, grpc.Errorf(codes.Internal, "Please try again later")
+			msg := message.HashMsg{Code: -1, Message: "invalid parameter", Hash: hex.EncodeToString(unfreezeTx.Hash)}
+			hashList = append(hashList, &msg)
 			continue
 		}
 
 		g.n.Broadcast(tx)
-		hashList = append(hashList, hex.EncodeToString(tx.Hash))
+		msg := message.HashMsg{Code: 0, Message: "ok", Hash: hex.EncodeToString(unfreezeTx.Hash)}
+		hashList = append(hashList, &msg)
 	}
-	//TODO:response
-	return &message.RespAdminTransactions{HashList: hashList}, nil
+
+	return &message.RespSignedTransactions{HashList: hashList}, nil
 }
 
 // GetFreezeBalance 获取address已冻结的的金额

@@ -62,6 +62,10 @@ func (n *node) AddPeer(id string) error {
 	return n.cp.AddPeer(id, id)
 }
 
+func (n *node) LeaderShipTransferToF() error {
+	return n.cp.LeaderShipTransferToF()
+}
+
 //CommitFunc commits the blocks
 type CommitFunc (func(interface{}, []byte) error)
 

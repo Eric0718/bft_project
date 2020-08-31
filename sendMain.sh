@@ -32,11 +32,7 @@ expect "*password:"
 send "$passwd\r"
 interact
 
-
-
-
-
-
-
-
+#scp ./kortho root@106.12.73.41:/root/bfttest
+#scp ./kortho root@182.61.186.204:/root/bfttest
+#scp ./kortho root@182.61.184.64:/root/bfttest
 

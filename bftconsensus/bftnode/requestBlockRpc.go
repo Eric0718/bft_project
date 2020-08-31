@@ -9,6 +9,24 @@ import (
 	"net/rpc"
 )
 
+/*
+	// client, err := rpc.DialHTTP("tcp", leaderaddr)
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	// req := ReqBlockrpc{
+	// 	ReqHeight: true,
+	// }
+	// res := ReSBlockrpc{Done: false}
+
+	// err := client.Call("RequestManage.HandleGetLeaderMaxBlockHeight", &req, &res)
+	// if err != nil {
+	// 	logger.Error("Call HandleGetLeaderMaxBlockHeight error", zap.Error(err))
+	// 	return 0, err
+	// }
+*/
+
 //RunRequestBlockRPC Register a rpc for follows to request to recover blocks data.
 func (rm *RequestManage) RunRequestBlockRPC() error {
 

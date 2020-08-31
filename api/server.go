@@ -71,6 +71,10 @@ func (s *Server) GetBalanceHandler(ctx *fasthttp.RequestCtx) {
 	ctx.Response.Header.Set("Access-Control-Allow-Origin", "*")
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	var result resultInfo
+	var balInfo struct {
+		name    string
+		balance uint64
+	}
 	defer func() {
 		jsbyte, _ := json.Marshal(result)
 		ctx.Write(jsbyte)
@@ -84,17 +88,33 @@ func (s *Server) GetBalanceHandler(ctx *fasthttp.RequestCtx) {
 		return
 	}
 
-	balance, err := blockChian.GetBalance(address)
-	if err != nil {
-		result.Code = failedCode
-		result.Message = ErrParameters
-		ctx.Response.SetStatusCode(http.StatusBadRequest)
-		return
+	symbol := ctx.QueryArgs().Peek("symbol")
+
+	if len(symbol) == 0 {
+		balance, err := blockChian.GetBalance(address)
+		if err != nil {
+			result.Code = failedCode
+			result.Message = ErrParameters
+			ctx.Response.SetStatusCode(http.StatusBadRequest)
+			return
+		}
+		balInfo.name = "Kto"
+		balInfo.balance = balance
+	} else {
+		balance, err := blockChian.GetTokenBalance(address, symbol)
+		if err != nil {
+			result.Code = failedCode
+			result.Message = ErrParameters
+			ctx.Response.SetStatusCode(http.StatusBadRequest)
+			return
+		}
+		balInfo.name = string(symbol)
+		balInfo.balance = balance
 	}
 
 	result.Code = successCode
 	result.Message = OK
-	result.Data = balance
+	result.Data = balInfo
 	ctx.Response.SetStatusCode(http.StatusOK)
 	return
 }

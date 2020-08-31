@@ -18,6 +18,7 @@ type Consensus interface {
 	AddPeer(string, string) error
 	//get leader address
 	GetLeader() string
+	LeaderShipTransferToF() error
 }
 
 type Config struct {
@@ -66,4 +67,11 @@ func (a *node) AddPeer(id string, addr string) error {
 
 func (a *node) GetLeader() string {
 	return string(a.Leader())
+}
+
+func (a *node) LeaderShipTransferToF() error {
+	if err := a.LeadershipTransfer(); err.Error() != nil {
+		return err.Error()
+	}
+	return nil
 }

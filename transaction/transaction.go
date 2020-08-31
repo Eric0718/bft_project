@@ -18,7 +18,7 @@ const (
 
 const (
 	// TransferTag 转账标记
-	TransferTag uint16 = iota
+	TransferTag int32 = iota
 	// MinerTag 矿工标记
 	MinerTag
 	// FreezeTag 锁仓标记
@@ -70,7 +70,7 @@ type Transaction struct {
 	//  1：矿工交易
 	//	2：锁仓交易
 	//	3：解锁交易
-	Tag uint16 `json:"tag"`
+	Tag int32 `json:"tag"`
 
 	// Order 交易中携带的订单数据，没有订单此项为nil
 	Order *Order `json:"ord"`
@@ -82,7 +82,7 @@ type Option struct {
 	Script  string
 	Root    []byte
 	Message string
-	Tag     uint16
+	Tag     int32
 	Ord     *Order
 }
 

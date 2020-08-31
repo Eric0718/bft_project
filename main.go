@@ -47,7 +47,7 @@ func main() {
 	go nB.Run()
 	for _, member := range cfg.P2PConfigList[0].Members {
 		if err := nB.Join([]string{member}); err != nil {
-			logger.Info("Failed to join p2p", zap.Error(err), zap.String("node id", member))
+			logger.Error("Failed to join p2p", zap.Error(err), zap.String("node id", member))
 		}
 	}
 	if cfg.BFTConfig == nil {
@@ -56,13 +56,6 @@ func main() {
 	}
 	go bftnode.RunbftNode(cfg.BFTConfig, bc, nB, tp)
 
-	// {
-	// 	cfg.P2PConfig.BindPort = cfg.P2PTxConfig.BindPort
-	// 	cfg.P2PConfig.BindAddr = cfg.P2PTxConfig.BindAddr
-	// 	cfg.P2PConfig.AdvertiseAddr = cfg.P2PTxConfig.AdvertiseAddr
-	// 	cfg.P2PConfig.Members = cfg.P2PTxConfig.Members
-	// 	cfg.P2PConfig.NodeName = cfg.P2PTxConfig.NodeName
-	// }
 	nT, err := node.New(cfg.P2PConfigList[1], tp, bc) //use for Tx Broadcast
 	if err != nil {
 		logger.Error("failed to new p2p node", zap.Error(err))
@@ -71,7 +64,7 @@ func main() {
 	go nT.Run()
 	for _, member := range cfg.P2PConfigList[1].Members {
 		if err := nT.Join([]string{member}); err != nil {
-			logger.Info("Failed to join Tx p2p", zap.Error(err), zap.String("node id", member))
+			logger.Error("Failed to join Tx p2p", zap.Error(err), zap.String("node id", member))
 		}
 	}
 

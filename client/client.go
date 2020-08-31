@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -58,49 +57,53 @@ func printUsage() {
 	fmt.Println("Usage:")
 
 	fmt.Println("    wallet:\n\t-n\t创建n个钱包")
-	fmt.Println("    send:\n\t-json\t交易数据json格式")
-	fmt.Println("    freeze:\n\t-json\t冻结请求的json格式\n\t-a\t获取冻结金额的地址")
+	fmt.Println("    send:\n\t-xfer\t交易数据json格式\n\t-frz\t冻结交易的json格式\n\t-unfrz\t解冻交易的json格式")
+	fmt.Println("    get:\n\t-frz\t获取已冻结的金额")
 }
 
 func (c *CLI) Run() {
 	isVaildArgs()
 
-	sendTransactionCmd := flag.NewFlagSet("send", flag.ExitOnError)
+	sendCmd := flag.NewFlagSet("send", flag.ExitOnError)
 	walletCmd := flag.NewFlagSet("wallet", flag.ExitOnError)
-	freezeBalanceCmd := flag.NewFlagSet("freeze", flag.ExitOnError)
+	getCmd := flag.NewFlagSet("get", flag.ExitOnError)
 
-	transactinJson := sendTransactionCmd.String("json", "", "交易的json格式")
 	number := walletCmd.Uint("n", 1, "钱包的个数")
-	freezeTransaction := freezeBalanceCmd.String("json", "", "冻结请求的json格式")
-	unlockTransaction := freezeBalanceCmd.String("unfreeze", "", "解冻请求的json格式")
-	freezeAddr := freezeBalanceCmd.String("a", "", "获取冻结金额的地址")
+	xferData := sendCmd.String("xfer", "", "交易的json格式")
+	frzData := sendCmd.String("frz", "", "冻结请求的json格式")
+	unfrzData := sendCmd.String("unfrz", "", "解冻请求的json格式")
+	freezeAddr := getCmd.String("frz", "", "获取冻结金额的地址")
 
 	switch os.Args[1] {
 	case "send":
 		c.getConn()
-		if err := sendTransactionCmd.Parse(os.Args[2:]); err != nil {
+		if err := sendCmd.Parse(os.Args[2:]); err != nil {
 			log.Panic(err)
 		}
 	case "wallet":
 		if err := walletCmd.Parse(os.Args[2:]); err != nil {
 			log.Panic(err)
 		}
-	case "freeze":
+	case "get":
 		c.getConn()
-		if err := freezeBalanceCmd.Parse(os.Args[2:]); err != nil {
+		if err := getCmd.Parse(os.Args[2:]); err != nil {
 			log.Panic(err)
 		}
 	default:
 		fmt.Printf("输入参数有误\n")
 	}
 
-	if sendTransactionCmd.Parsed() {
-		if len(*transactinJson) != 0 {
+	if sendCmd.Parsed() {
+		if len(*xferData) != 0 {
 			var req message.ReqTransaction
-			if err := json.Unmarshal([]byte(*transactinJson), &req); err != nil {
+			if err := json.Unmarshal([]byte(*xferData), &req); err != nil {
 				log.Panic(err)
 			}
 			c.sendTransaction(&req)
+		} else if len(*frzData) != 0 {
+			c.freezeBalance(*frzData)
+		} else if len(*unfrzData) != 0 {
+			c.unFreezeTransaction(*unfrzData)
 		}
 	}
 
@@ -108,15 +111,10 @@ func (c *CLI) Run() {
 		c.getWallet(int(*number))
 	}
 
-	if freezeBalanceCmd.Parsed() {
-		if len(*freezeTransaction) != 0 {
-			c.freezeBalance(*freezeTransaction)
-		} else if len(*freezeAddr) != 0 {
+	if getCmd.Parsed() {
+		if len(*freezeAddr) != 0 {
 			c.getFreezeBalance(*freezeAddr)
-		} else if len(*unlockTransaction) != 0 {
-			c.unFreezeTransaction(*unlockTransaction)
 		}
-
 	}
 }
 
@@ -130,7 +128,8 @@ func (c *CLI) sendTransaction(req *message.ReqTransaction) {
 	req.Nonce = nonceResp.Nonce
 	txResp, err := c.SendTransaction(context.Background(), req)
 	if err != nil {
-		log.Panic(err)
+		fmt.Printf("send xfer error:%s\n", err)
+		return
 	}
 
 	fmt.Printf("transaction hash:%s\n", txResp.Hash)
@@ -155,13 +154,12 @@ func (c *CLI) freezeBalance(freezeTransaction string) {
 		log.Fatal(err)
 	}
 	fmt.Println("get nonce:", nonceResp.Nonce)
-	var freezeTx message.SimpleTransaction
-
+	var freezeTx message.ReqSignedTransaction
 	if err := json.Unmarshal([]byte(freezeTransaction), &freezeTx); err != nil {
 		log.Panic(err)
 	}
 	from, _ := types.StringToAddress("Kto2YGvFKXQtSazWp9hPZyBrA9JPkxgNE6GW56o7jcdQXTq")
-	to, err := types.StringToAddress(freezeTx.Address)
+	to, err := types.StringToAddress(freezeTx.To)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -183,13 +181,13 @@ func (c *CLI) freezeBalance(freezeTransaction string) {
 
 	freezeTx.Time = tx.Time
 	freezeTx.Nonce = tx.Nonce
-	freezeTx.Hash = hex.EncodeToString(tx.Hash)
-	freezeTx.Signature = hex.EncodeToString(tx.Signature)
+	freezeTx.Hash = tx.Hash
+	freezeTx.Signature = tx.Signature
 
-	var req message.ReqAdminTransactions
+	var req message.ReqSignedTransactions
 	req.Txs = append(req.Txs, &freezeTx)
 
-	txResp, err := c.FreezeBalance(context.Background(), &req)
+	txResp, err := c.SendFreezeTransactions(context.Background(), &req)
 	if err != nil {
 		log.Panic(err)
 	}
@@ -218,14 +216,14 @@ func (c *CLI) unFreezeTransaction(unfreezeTransaction string) {
 		log.Fatal(err)
 	}
 	fmt.Println("get nonce:", nonceResp.Nonce)
-	var freezeTx message.SimpleTransaction
+	var freezeTx message.ReqSignedTransaction
 
 	if err := json.Unmarshal([]byte(unfreezeTransaction), &freezeTx); err != nil {
 		log.Panic(err)
 	}
 
 	from, _ := types.StringToAddress("Kto2YGvFKXQtSazWp9hPZyBrA9JPkxgNE6GW56o7jcdQXTq")
-	to, err := types.StringToAddress(freezeTx.Address)
+	to, err := types.StringToAddress(freezeTx.To)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -244,13 +242,13 @@ func (c *CLI) unFreezeTransaction(unfreezeTransaction string) {
 
 	freezeTx.Time = tx.Time
 	freezeTx.Nonce = tx.Nonce
-	freezeTx.Hash = hex.EncodeToString(tx.Hash)
-	freezeTx.Signature = hex.EncodeToString(tx.Signature)
+	freezeTx.Hash = tx.Hash
+	freezeTx.Signature = tx.Signature
 
-	var req message.ReqAdminTransactions
+	var req message.ReqSignedTransactions
 	req.Txs = append(req.Txs, &freezeTx)
 
-	txResp, err := c.UnfreezeBalance(context.Background(), &req)
+	txResp, err := c.SendUnfreezeTransactions(context.Background(), &req)
 	if err != nil {
 		log.Panic(err)
 	}

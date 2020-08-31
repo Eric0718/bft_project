@@ -79,17 +79,6 @@ func (n *bftnode) Run() {
 
 	}
 	time.Sleep(time.Second * 2)
-
-	//this rpc for follows to recover the backward blocks.
-	rm := RequestManage{n}
-	go func() {
-		err := rm.RunRequestBlockRPC()
-		if err != nil {
-			logger.Error("Run Request Block Rpc error", zap.Error(err))
-			os.Exit(1)
-		}
-	}()
-
 	for {
 		select {
 		case <-time.After(time.Second):
@@ -134,7 +123,9 @@ func (n *bftnode) Run() {
 	}
 }
 
+//DataStu add ResultHash
 type DataStu struct {
+	//TODO：处理数据为nil时，引起panic的bug
 	Block      *block.Block `json:"block"`
 	ResultHash []byte       `json:"resulthash"`
 }
@@ -190,8 +181,7 @@ func checkBlockData(u interface{}, data []byte) ([]byte, uint64, error) {
 	b := blockData.Block
 	if b == nil {
 		logger.Error("b is nil")
-	} else if len(b.Hash) == 0 {
-		logger.Error("b is nil")
+		return nil, 0, errors.New("block data is nil")
 	}
 
 	//not an expect block data,so return error here.

@@ -15,14 +15,18 @@ message order {
 
 message Tx {
   uint64 Nonce = 1;
-  uint64 Amount = 2;
-  string From = 3;
-  string To = 4;
-  string Hash = 5;
-  string Signature = 6;
-  int64 Time = 7;
-  string script = 8;
-  order order = 9;
+  uint64 BlockNum = 2;
+  uint64 Amount = 3;
+  string From = 4;
+  string To = 5;
+  string Hash = 6;
+  string Signature = 7;
+  int64 Time = 8;
+  string Script = 9;
+  uint64 Fee = 10;
+  bytes Root = 11;
+  int32 Tag = 12;
+  order order = 13;
 }
 
 message res_tx { repeated Tx Txs = 1; }
@@ -71,7 +75,7 @@ message req_transaction {
 message res_transaction { string Hash = 1; }
 
 message req_transactions { repeated req_transaction txs = 1; }
-message resp_transactions { repeated string hashList = 1; }
+message resp_transactions { repeated hashMsg hashList = 1; }
 
 message req_signed_transaction {
   string from = 1;
@@ -84,8 +88,13 @@ message req_signed_transaction {
 }
 message resp_signed_transaction { string hash = 1; }
 
+message hashMsg {
+  int64 code = 1;
+  string message = 2;
+  string hash = 3;
+}
 message req_signed_transactions { repeated req_signed_transaction txs = 1; }
-message resp_signed_transactions { repeated string hashList = 1; }
+message resp_signed_transactions { repeated hashMsg hashList = 1; }
 
 message req_create_addr {}
 message resp_create_addr {
@@ -138,17 +147,6 @@ message req_token_transaction {
 }
 message resp_token_transaction { string hash = 1; }
 
-message simpleTransaction {
-  uint64 nonce = 1;
-  uint64 amount = 2;
-  string address = 3;
-  int64 time = 4;
-  string hash = 5;
-  string signature = 6;
-}
-message req_admin_transactions { repeated simpleTransaction txs = 2; }
-message resp_admin_transactions { repeated string hashList = 1; }
-
 message freezeBalance {
   string address = 1;
   uint64 balance = 2;
@@ -158,28 +156,32 @@ message req_get_freeze_bal { repeated string addressList = 1; }
 message resp_get_freeze_bal { repeated freezeBalance results = 1; }
 
 service Greeter {
-  rpc GetBlockByNum(req_block_by_number) returns (resp_block) {}
-  rpc GetBlockByHash(req_block_by_hash) returns (resp_block) {}
+  rpc GetAddrByPriv(req_addr_by_priv) returns (resp_addr_by_priv) {}
   rpc GetBalance(req_balance) returns (res_balance) {}
+  rpc GetBalanceToken(req_token_balance) returns (resp_token_balance) {}
+  rpc GetFreezeBalance(req_get_freeze_bal) returns (resp_get_freeze_bal) {}
+  rpc GetAddressNonceAt(req_nonce) returns (respose_nonce) {}
   rpc GetTxsByAddr(req_tx) returns (respose_txs) {}
   rpc GetTxByHash(req_tx_by_hash) returns (resp_tx_by_hash) {}
+  rpc GetMaxBlockNumber(req_max_block_number) returns (resp_max_block_number) {}
+  rpc GetBlockByNum(req_block_by_number) returns (resp_block) {}
+  rpc GetBlockByHash(req_block_by_hash) returns (resp_block) {}
+
   rpc SendTransaction(req_transaction) returns (res_transaction) {}
   rpc SendTransactions(req_transactions) returns (resp_transactions) {}
   rpc SendSignedTransaction(req_signed_transaction)
       returns (resp_signed_transaction) {}
   rpc SendSignedTransactions(req_signed_transactions)
       returns (resp_signed_transactions) {}
-  rpc GetAddressNonceAt(req_nonce) returns (respose_nonce) {}
-  rpc CreateAddr(req_create_addr) returns (resp_create_addr) {}
-  rpc GetMaxBlockNumber(req_max_block_number) returns (resp_max_block_number) {}
-  rpc GetAddrByPriv(req_addr_by_priv) returns (resp_addr_by_priv) {}
-  rpc SignOrd(req_sign_ord) returns (resp_sign_ord) {}
-  rpc MintToken(req_token_create) returns (resp_token_create) {}
-  rpc CreateContract(req_token_create) returns (resp_token_create) {}
-  rpc GetBalanceToken(req_token_balance) returns (resp_token_balance) {}
+  rpc SendFreezeTransactions(req_signed_transactions)
+      returns (resp_signed_transactions) {}
+  rpc SendUnfreezeTransactions(req_signed_transactions)
+      returns (resp_signed_transactions) {}
   rpc SendToken(req_token_transaction) returns (resp_token_transaction) {}
-  rpc FreezeBalance(req_admin_transactions) returns (resp_admin_transactions) {}
-  rpc UnfreezeBalance(req_admin_transactions)
-      returns (resp_admin_transactions) {}
-  rpc GetFreezeBalance(req_get_freeze_bal) returns (resp_get_freeze_bal) {}
+
+  rpc CreateAddr(req_create_addr) returns (resp_create_addr) {}
+  rpc CreateContract(req_token_create) returns (resp_token_create) {}
+  rpc MintToken(req_token_create) returns (resp_token_create) {}
+
+  rpc SignOrd(req_sign_ord) returns (resp_sign_ord) {}
 }

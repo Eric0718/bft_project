@@ -2,25 +2,28 @@
 package node
 
 import (
+	"bytes"
+	"context"
+	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"kortho/api"
+	pb "kortho/api/message"
 	"kortho/bftconsensus/protocol"
 	"kortho/block"
 	"kortho/blockchain"
 	"kortho/logger"
+	"kortho/transaction"
 	"kortho/txpool"
-	"net/rpc"
-	"os"
+	"kortho/types"
 	"strings"
 	"time"
 
 	"github.com/hashicorp/raft"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
-
-const recoverNum = 1000 //total blocks number when request backward data from leader
 
 //New node
 func New(cfg *Config, u interface{}, cf CommitFunc, df DeliveFunc, bc blockchain.Blockchains, pool *txpool.TxPool) (Node, error) {
@@ -70,42 +73,53 @@ func (n *node) Prepare(data []byte) error {
 
 //deal with raft log.
 func (n *node) Apply(e *raft.Log) interface{} {
-	logger.Info("Into Apply ", zap.String("Current leader:", n.cp.GetLeader()), zap.String("Self Address", n.nodeAddr), zap.Uint64("e.Index", e.Index), zap.Uint64("e.term", e.Term))
-
-	client, err := n.getRPCClient()
-	if err != nil {
-		logger.Error("get Rpc Connection error", zap.Error(err))
-		return err
-	}
-	defer client.Close()
+	logger.Info("Into Apply ", zap.Uint64("e.Index", e.Index), zap.Uint64("e.term", e.Term))
+	var leaderLastHeight uint64
+	var CConn *grpc.ClientConn
 
 	blockData := struct {
 		Block *block.Block `json:"block"`
 	}{}
 
-	if err = json.Unmarshal(e.Data, &blockData); err != nil {
+	if err := json.Unmarshal(e.Data, &blockData); err != nil {
+		logger.Error("Apply json.Unmarshal error", zap.Error(err))
 		return err
 	}
 	b := blockData.Block
 
 	//already commited.
-	if b.Height <= n.currentHeight {
+	if b.Height < 1+n.currentHeight {
 		logger.Info("height already commited,end apply", zap.Uint64("b.Height", b.Height), zap.Uint64("Current Height", n.currentHeight))
 		return nil
 	}
 
-	var leaderLastHeight uint64
-	if n.cp.GetLeader() != n.nodeAddr {
-		breakC := time.After(3 * time.Second)
+	leader := n.cp.GetLeader()
+	if leader == "" {
+		logger.Error("Error: the cluster no leader now,return apply")
+		return nil
+	}
+	logger.Info("Leader Address:", zap.String("Current leader", leader), zap.String("Node Address", n.nodeAddr))
+
+	if leader != n.nodeAddr {
+		//only follows need to build connection with leader
+		CConn = n.getRPCClient()
+		if CConn == nil {
+			logger.Error("getRPCClient failed!")
+			return nil
+		}
+		defer CConn.Close()
+
+		//only follows need to get the max Block Height From Leader
+		breakC := time.After(2 * time.Second)
 		for {
 			select {
 			case <-breakC:
-				logger.Error("getLastHeightFromLeader failed,timeout...")
-				return errors.New("getLastHeightFromLeader failed: request timeout")
-			case <-time.After(time.Millisecond * 10):
-				h, err := n.getLastHeightFromLeader(client)
+				logger.Error("getMaxBlockHeightFromLeader timeout,return...")
+				return nil
+			case <-time.After(time.Millisecond):
+				h, err := n.getMaxBlockHeightFromLeader(CConn)
 				if err != nil {
-					logger.Error("getLastHeightFromLeader failed,continue to get...")
+					logger.Error("getMaxBlockHeightFromLeader failed,continue to get...", zap.Error(err))
 					continue
 				} else {
 					leaderLastHeight = h
@@ -114,10 +128,8 @@ func (n *node) Apply(e *raft.Log) interface{} {
 			}
 			break
 		}
-
 		logger.Info("node status:", zap.Uint64("n.currentHeight", n.currentHeight), zap.Uint64("b.Height", b.Height), zap.Uint64("leaderLastHeight", leaderLastHeight))
-
-		//commit without check when restart.
+		//commit without check to catch up with leader.
 		if b.Height <= leaderLastHeight {
 			if n.currentHeight+1 == b.Height {
 				err := n.commitF(n.u, e.Data)
@@ -125,48 +137,52 @@ func (n *node) Apply(e *raft.Log) interface{} {
 					logger.Error("commit block error", zap.Error(err))
 					return err
 				}
-				n.deleteCommitedBlockInMap(leaderLastHeight)
 				n.currentHeight = b.Height
+				logger.Info("End Apply without delive")
 			} else { //recover backward blocks by rpc
-				i := n.currentHeight + 1
-				for j := (i + recoverNum); j <= leaderLastHeight; j = i + recoverNum {
-					err := n.recoverBackwardBlocks(client, i, j)
-					if err != nil {
-						logger.Error("recoverBackwardBlocks error", zap.Error(err))
-						return err
-					}
-					i = n.currentHeight + 1
-				}
-				if n.currentHeight+1 < leaderLastHeight {
-					err := n.recoverBackwardBlocks(client, i, leaderLastHeight)
-					if err != nil {
-						logger.Error("recoverBackwardBlocks error", zap.Error(err))
-						return err
-					}
+				err := n.recoverBackwardBlocks(CConn, n.currentHeight+1, leaderLastHeight)
+				if err != nil {
+					logger.Error("recoverBackwardBlocks error", zap.Error(err))
+					return err
 				}
 			}
-			logger.Info("End Apply without delive")
+			n.deleteCommitedBlockInMap(leaderLastHeight)
 			return nil
 		}
+	}
+
+	if b.Height > 1+n.currentHeight && !n.IsMiner() {
+		err := n.recoverBackwardBlocks(CConn, n.currentHeight+1, leaderLastHeight)
+		if err != nil {
+			logger.Error("recoverBackwardBlocks error", zap.Error(err))
+			return err
+		}
+		n.deleteCommitedBlockInMap(leaderLastHeight)
 	}
 
 	if b.Height == 1+n.currentHeight {
 		//callback delive function
 		n.deliveF(n.u, e.Data)
 
-		breakC := time.After(time.Minute * 5)  //exit when timeout
-		deliveC := time.After(time.Second * 5) //delive per 5 seconds.
+		breakC := time.After(time.Minute)  //return when timeout
+		deliveC := time.After(time.Second) //delive per 5 seconds.
 		for {
 			select {
 			case <-breakC:
-				//restart when timeout
-				logger.Error("Apply error:timeout,restart......")
-				os.Exit(1)
+				logger.Error("Apply error:timeout,return......")
+				if n.IsMiner() {
+					logger.Debug("Do LeaderShip Transfer To Follow.")
+					err := n.LeaderShipTransferToF()
+					if err != nil {
+						logger.Error("LeaderShipTransferToF error", zap.Error(err))
+					}
+				}
+				return nil
 			case <-deliveC:
 				logger.Info("delive again...")
 				n.deliveF(n.u, e.Data)
-			case <-time.After(time.Millisecond * 10):
-				if n.handleBlockData(b.Height, e.Data) {
+			case <-time.After(time.Millisecond * 2):
+				if n.handleBlockData(b.Height, b.Hash, e.Data) {
 					n.deleteCommitedBlockInMap(b.Height)
 					logger.Info("End Apply", zap.Uint64("current height", n.currentHeight))
 					return nil
@@ -174,17 +190,17 @@ func (n *node) Apply(e *raft.Log) interface{} {
 			}
 		}
 	}
-	return errors.New("Wrong raft log block data")
+	return nil
 }
 
 //deal with a block data which needs to commit when more than 2/3 nodes checked true or over 1/3 are false.
-func (n *node) handleBlockData(hei uint64, data []byte) bool {
+func (n *node) handleBlockData(hei uint64, hs []byte, data []byte) bool {
 	var trueCount, falseCount uint64
 	n.pool.Mutex.RLock()
 	defer n.pool.Mutex.RUnlock()
 	for _, v := range n.pool.Idhc {
 		if v.Height == hei {
-			if v.Code {
+			if bytes.Equal(v.Hash, hs) && v.Code {
 				trueCount++
 			} else {
 				falseCount++
@@ -208,7 +224,7 @@ func (n *node) handleBlockData(hei uint64, data []byte) bool {
 
 	//over 1/3 nodes checked false,the block can not to be commited.
 	if falseCount > n.nodeN/3 {
-		logger.Error("handleBlockData error: Over 1/3 nodes checked failed and abandoned to commit block", zap.Uint64("ok Count", trueCount), zap.Uint64("failed Count", falseCount), zap.Uint64("total nodes / 3", n.nodeN/3))
+		logger.Error("handleBlockData error: Over 1/3 nodes checked failed and abandoned to commit block", zap.Uint64("ok Count", trueCount), zap.Uint64("failed Count", falseCount))
 		return false
 	}
 	return false
@@ -230,88 +246,146 @@ func (n *node) deleteCommitedBlockInMap(hei uint64) {
 	logger.Info("finished delete commited height in map.", zap.Uint64("height", hei), zap.Int("map length", len(n.pool.Idhc)))
 }
 
-func (n *node) getRPCClient() (*rpc.Client, error) {
-	addr := n.cp.GetLeader()
-	ad := strings.Split(addr, ":")
-	leaderaddr := ad[0] + n.rpcPort
-	//logger.Info("start to get rpc connection...", zap.String("leader address", leaderaddr))
-	client, err := rpc.DialHTTP("tcp", leaderaddr)
-	if err != nil {
-		return nil, err
+func (n *node) getRPCClient() *grpc.ClientConn {
+	breakC := time.After(time.Minute)
+	for {
+		select {
+		case <-breakC:
+			//restart when timeout
+			logger.Error("getRPCClient error timeout,return......")
+			return nil
+		case <-time.After(time.Millisecond):
+			addr := n.cp.GetLeader()
+			ad := strings.Split(addr, ":")
+			leaderaddr := ad[0] + n.rpcPort
+			conn, err := grpc.Dial(leaderaddr, grpc.WithInsecure(), grpc.WithBlock())
+			if err != nil {
+				logger.Error("grpc Dial error", zap.Error(err))
+				continue
+			}
+			return conn
+		}
 	}
-	return client, nil
 }
 
 //Get the latest height from leader.
-func (n *node) getLastHeightFromLeader(client *rpc.Client) (uint64, error) {
+func (n *node) getMaxBlockHeightFromLeader(CConn *grpc.ClientConn) (uint64, error) {
 
-	req := ReqBlockrpc{
-		ReqHeight: true,
-	}
-	res := ReSBlockrpc{Done: false}
+	cc := pb.NewGreeterClient(CConn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	err := client.Call("RequestManage.HandleGetLeaderMaxBlockHeight", &req, &res)
+	res, err := cc.GetMaxBlockNumber(ctx, &pb.ReqMaxBlockNumber{})
 	if err != nil {
 		logger.Error("Call HandleGetLeaderMaxBlockHeight error", zap.Error(err))
 		return 0, err
 	}
-	if !res.Done {
-		return 0, fmt.Errorf("request leader max block height failed.res.Done = %v", res.Done)
-	}
 
-	return res.MaxHieght, nil
+	return res.MaxNumber, nil
 }
 
 //recover backward blocks data from height 'lo' to 'hi'.
-func (n *node) recoverBackwardBlocks(client *rpc.Client, lo uint64, hi uint64) error {
+func (n *node) recoverBackwardBlocks(CConn *grpc.ClientConn, lo uint64, hi uint64) error {
 	logger.Info("Into recoverBackwardBlocks", zap.Uint64("low height", lo), zap.Uint64("high height", hi))
-	n.deleteCommitedBlockInMap(hi)
-	req := ReqBlockrpc{
-		ReqBlocks: true,
-		LowH:      lo,
-		HeiH:      hi,
-	}
-	res := ReSBlockrpc{Done: false}
 
-	//request backward data from leader by rpc.
-	err := client.Call("RequestManage.HandleGetBlockSection", &req, &res)
-	if err != nil {
-		logger.Error("Call HandleGetBlockSection error", zap.Error(err))
-		return err
+	cc := pb.NewGreeterClient(CConn)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if lo > hi {
+		return fmt.Errorf("Wrong block interval：lo[%v] > hi[%v]", lo, hi)
 	}
 
-	var blocks []block.Block
-	if res.Done && len(res.Data) > 0 {
-		err := json.Unmarshal(res.Data, &blocks)
+	for i := lo; i <= hi; i++ {
+		logger.Info("Start to recover Backward Blocks", zap.Uint64("Height", i))
+		res, err := cc.GetBlockByNum(ctx, &pb.ReqBlockByNumber{Height: i})
 		if err != nil {
-			logger.Error("json Unmarshal error", zap.Error(err))
+			logger.Error("recoverBackwardBlocks GetBlockByNum error", zap.Error(err))
 			return err
 		}
-		//commit request backward data
-		if blocks != nil && len(blocks) > 0 {
-			for _, bs := range blocks {
-				if bs.Height <= n.currentHeight { //discard already commited blocks.
-					continue
-				}
-				if n.currentHeight+1 == bs.Height {
-					data, err := json.Marshal(bs)
-					if err != nil {
-						logger.Error("json Marshal error", zap.Error(err))
-						return err
-					}
-					err = n.commitF(n.u, data)
-					if err != nil {
-						logger.Error("commit block error", zap.Error(err))
-						return err
-					}
-					n.currentHeight = bs.Height
-				}
+		if res == nil {
+			continue
+		}
+
+		bc, err := n.blockConversion(res)
+		if err != nil {
+			return err
+		}
+		if bc.Height <= n.currentHeight {
+			continue
+		}
+
+		if n.currentHeight+1 == bc.Height {
+			bData := struct {
+				Block *block.Block
+			}{
+				Block: bc,
 			}
-			logger.Info("End recoverBackwardBlocks", zap.Uint64("current height", n.currentHeight))
-			return nil
+			data, err := json.Marshal(bData)
+			if err != nil {
+				logger.Error("json Marshal error", zap.Error(err))
+				return err
+			}
+			err = n.commitF(n.u, data)
+			if err != nil {
+				logger.Error("commit block error", zap.Error(err))
+				return err
+			}
+			n.currentHeight = bc.Height
+		}
+
+	}
+
+	logger.Info("End recoverBackwardBlocks", zap.Uint64("current height", n.currentHeight))
+	return nil
+}
+
+func (n *node) blockConversion(res *pb.RespBlock) (*block.Block, error) {
+	var Tx []*transaction.Transaction
+
+	if len(res.Txs) > 0 {
+		for _, msTx := range res.Txs {
+			if msTx != nil {
+				t, err := api.MsgTxToTx(msTx)
+				if err != nil {
+					return nil, err
+				}
+				Tx = append(Tx, t)
+			}
 		}
 	}
-	return fmt.Errorf("recoverBackwardBlocks failed: res.Done= %v,request Data lenght= %v,blocks lenght= %v", res.Done, len(res.Data), len(blocks))
+
+	PrHs, err := hex.DecodeString(res.PrevBlockHash)
+	if err != nil {
+		return nil, err
+	}
+
+	Hs, err := hex.DecodeString(res.Hash)
+	if err != nil {
+		return nil, err
+	}
+
+	Rt, err := hex.DecodeString(res.Root)
+	if err != nil {
+		return nil, err
+	}
+
+	ad, err := types.StringToAddress(res.Miner)
+	if err != nil {
+		return nil, err
+	}
+
+	b := &block.Block{
+		Height:       res.Height,
+		PrevHash:     PrHs,
+		Hash:         Hs,
+		Transactions: Tx,
+		Root:         Rt,
+		Version:      res.Version,
+		Timestamp:    res.Timestamp,
+		Miner:        *ad,
+	}
+	return b, nil
 }
 
 //generate a snapshot struct

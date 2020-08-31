@@ -21,8 +21,7 @@ type Block struct {
 	Root         []byte                     `json:"root"`      //默克根
 	Version      uint64                     `json:"version"`   //版本号
 	Timestamp    int64                      `json:"timestamp"` //时间戳
-	Miner        types.Address              `json:"miner"`
-	ResultHash   []byte                     `json:"resultHash"` //TODO：不应该写在block中
+	Miner        types.Address              `json:"miner"`     //矿工地址
 }
 
 func newBlock(height uint64, prevHash []byte, transactions []*transaction.Transaction) *Block {
