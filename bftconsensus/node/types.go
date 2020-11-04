@@ -20,7 +20,8 @@ type Config struct {
 	StableDir         string //raft stable location
 	NodeNum           uint64 //node number
 	RPCPort           string //request max block height rpc
-	RecPort           string //request backward blocks data rpc
+	MRpcAddr          string
+	MRpcPort          string //request backward blocks data rpc
 }
 
 //Node interface
@@ -29,6 +30,7 @@ type Node interface {
 	DelPeer(string) error //delete a node
 	AddPeer(string) error //add a node
 	Prepare([]byte) error //Prepare a block data
+	GetLeader() string
 }
 
 type node struct {
@@ -47,6 +49,11 @@ type node struct {
 	nodeAddr      string                 //node address
 }
 
+//spread a block data to other nodes by p2p
+func (n *node) Prepare(data []byte) error {
+	return n.cp.Prepare(data)
+}
+
 //true leader,false follow
 func (n *node) IsMiner() bool {
 	return n.cp.IsMiner()
@@ -62,30 +69,23 @@ func (n *node) AddPeer(id string) error {
 	return n.cp.AddPeer(id, id)
 }
 
+func (n *node) GetLeader() string {
+	return n.cp.GetLeader()
+}
+
 func (n *node) LeaderShipTransferToF() error {
 	return n.cp.LeaderShipTransferToF()
+}
+
+func (n *node) GetStats() map[string]string {
+	return n.cp.GetStats()
 }
 
 //CommitFunc commits the blocks
 type CommitFunc (func(interface{}, []byte) error)
 
 //DeliveFunc delive the blocks
-type DeliveFunc (func(interface{}, []byte))
+type DeliveFunc (func(interface{}, []byte) error)
 
 type snapshot struct {
-}
-
-//ReSBlockrpc result info
-type ReSBlockrpc struct {
-	Done      bool   //'true' requests successfully,'false' failed.
-	Data      []byte //blocks data
-	MaxHieght uint64 //leader max block height
-}
-
-//ReqBlockrpc requests blocks from height 'LowH' to 'HeiH'.
-type ReqBlockrpc struct {
-	ReqHeight bool   //request leader max block height
-	ReqBlocks bool   //request leader blocks from height 'LowH' to 'HeiH'
-	LowH      uint64 //form LowH
-	HeiH      uint64 //to HeiH
 }

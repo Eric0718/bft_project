@@ -46,6 +46,7 @@ func New(config Config, u interface{}, notify NotifyFunc) (*p2p, error) {
 	cfg.BindAddr = config.BindAddr
 	cfg.AdvertisePort = config.Port
 	cfg.AdvertiseAddr = config.AdvertiseAddr
+	cfg.TCPTimeout = 1 * time.Second
 	ml, err := memberlist.Create(cfg)
 	if err != nil {
 		return nil, err

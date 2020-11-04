@@ -12,8 +12,9 @@ import (
 	"go.uber.org/zap"
 )
 
-//new a raft node
+//New new a raft node
 func New(cfg *Config, fsm raft.FSM) (*node, error) {
+	logger.Info("Init raft...")
 	trans, err := newRaftTransport(cfg.Address)
 	if err != nil {
 		logger.Error("newRaftTransport error", zap.Error(err), zap.String("node addr", cfg.Address))

@@ -43,9 +43,9 @@ func New(cfg *Config, u interface{}, cf CommitFunc, df DeliveFunc, bc blockchain
 		logger.Error("protocol New error:", zap.Error(err))
 		return nil, err
 	}
-	{
-		logger.Info("init...")
-	}
+
+	logger.Info("Init node...")
+
 	n.u = u
 	n.cp = cp
 	n.commitF = cf
@@ -55,7 +55,6 @@ func New(cfg *Config, u interface{}, cf CommitFunc, df DeliveFunc, bc blockchain
 	n.nodeN = cfg.NodeNum
 	n.bc = bc
 	n.rpcPort = cfg.RPCPort
-	n.recPort = cfg.RecPort
 	n.nodeAddr = cfg.Address
 	chi, err := n.bc.GetHeight()
 	if err != nil {
@@ -66,16 +65,10 @@ func New(cfg *Config, u interface{}, cf CommitFunc, df DeliveFunc, bc blockchain
 	return &n, nil
 }
 
-//spread a block data to other nodes by p2p
-func (n *node) Prepare(data []byte) error {
-	return n.cp.Prepare(data)
-}
-
 //deal with raft log.
 func (n *node) Apply(e *raft.Log) interface{} {
-	logger.Info("Into Apply ", zap.Uint64("e.Index", e.Index), zap.Uint64("e.term", e.Term))
-	var leaderLastHeight uint64
-	var CConn *grpc.ClientConn
+	//s := n.GetStats()
+	logger.Info("Apply Start:", zap.Uint64("e.Index", e.Index), zap.Uint64("e.term", e.Term), zap.String("num_peers", n.GetStats()["num_peers"]))
 
 	blockData := struct {
 		Block *block.Block `json:"block"`
@@ -89,17 +82,43 @@ func (n *node) Apply(e *raft.Log) interface{} {
 
 	//already commited.
 	if b.Height < 1+n.currentHeight {
-		logger.Info("height already commited,end apply", zap.Uint64("b.Height", b.Height), zap.Uint64("Current Height", n.currentHeight))
+		logger.Info("Apply End: height already commited", zap.Uint64("b.Height", b.Height), zap.Uint64("Current Height", n.currentHeight))
 		return nil
 	}
+
+	logger.Info("Leader Address:", zap.String("Current leader", n.cp.GetLeader()), zap.String("Node Address", n.nodeAddr), zap.Uint64("Current Height", n.currentHeight))
+
+	if b.Height == 1+n.currentHeight {
+		//This for two phase
+
+		//check block
+		err := n.deliveF(n.u, e.Data)
+		if err != nil {
+			logger.Error("delive block error", zap.Error(err))
+			return false
+		}
+
+		//commit block
+		err = n.commitF(n.u, e.Data)
+		if err != nil {
+			logger.Error("commit block error", zap.Error(err))
+			return false
+		}
+		n.currentHeight = b.Height
+
+		logger.Info("Apply End:", zap.Uint64("b.Height", b.Height), zap.Uint64("current height", n.currentHeight))
+		return nil
+	}
+
+	//b.Height > 1+n.currentHeight,need to recover block data
+	var leaderLastHeight uint64
+	var CConn *grpc.ClientConn
 
 	leader := n.cp.GetLeader()
 	if leader == "" {
 		logger.Error("Error: the cluster no leader now,return apply")
 		return nil
 	}
-	logger.Info("Leader Address:", zap.String("Current leader", leader), zap.String("Node Address", n.nodeAddr))
-
 	if leader != n.nodeAddr {
 		//only follows need to build connection with leader
 		CConn = n.getRPCClient()
@@ -116,77 +135,27 @@ func (n *node) Apply(e *raft.Log) interface{} {
 			case <-breakC:
 				logger.Error("getMaxBlockHeightFromLeader timeout,return...")
 				return nil
-			case <-time.After(time.Millisecond):
+			case <-time.After(time.Millisecond * 10):
 				h, err := n.getMaxBlockHeightFromLeader(CConn)
 				if err != nil {
 					logger.Error("getMaxBlockHeightFromLeader failed,continue to get...", zap.Error(err))
 					continue
-				} else {
-					leaderLastHeight = h
-					break
 				}
+				leaderLastHeight = h
 			}
 			break
 		}
-		logger.Info("node status:", zap.Uint64("n.currentHeight", n.currentHeight), zap.Uint64("b.Height", b.Height), zap.Uint64("leaderLastHeight", leaderLastHeight))
+
 		//commit without check to catch up with leader.
 		if b.Height <= leaderLastHeight {
-			if n.currentHeight+1 == b.Height {
-				err := n.commitF(n.u, e.Data)
-				if err != nil {
-					logger.Error("commit block error", zap.Error(err))
-					return err
-				}
-				n.currentHeight = b.Height
-				logger.Info("End Apply without delive")
-			} else { //recover backward blocks by rpc
-				err := n.recoverBackwardBlocks(CConn, n.currentHeight+1, leaderLastHeight)
-				if err != nil {
-					logger.Error("recoverBackwardBlocks error", zap.Error(err))
-					return err
-				}
+			mh, err := n.bc.GetMaxBlockHeight()
+			if err == nil {
+				n.currentHeight = mh
 			}
-			n.deleteCommitedBlockInMap(leaderLastHeight)
-			return nil
-		}
-	}
-
-	if b.Height > 1+n.currentHeight && !n.IsMiner() {
-		err := n.recoverBackwardBlocks(CConn, n.currentHeight+1, leaderLastHeight)
-		if err != nil {
-			logger.Error("recoverBackwardBlocks error", zap.Error(err))
-			return err
-		}
-		n.deleteCommitedBlockInMap(leaderLastHeight)
-	}
-
-	if b.Height == 1+n.currentHeight {
-		//callback delive function
-		n.deliveF(n.u, e.Data)
-
-		breakC := time.After(time.Minute)  //return when timeout
-		deliveC := time.After(time.Second) //delive per 5 seconds.
-		for {
-			select {
-			case <-breakC:
-				logger.Error("Apply error:timeout,return......")
-				if n.IsMiner() {
-					logger.Debug("Do LeaderShip Transfer To Follow.")
-					err := n.LeaderShipTransferToF()
-					if err != nil {
-						logger.Error("LeaderShipTransferToF error", zap.Error(err))
-					}
-				}
-				return nil
-			case <-deliveC:
-				logger.Info("delive again...")
-				n.deliveF(n.u, e.Data)
-			case <-time.After(time.Millisecond * 2):
-				if n.handleBlockData(b.Height, b.Hash, e.Data) {
-					n.deleteCommitedBlockInMap(b.Height)
-					logger.Info("End Apply", zap.Uint64("current height", n.currentHeight))
-					return nil
-				}
+			er := n.recoverBackwardBlocks(CConn, n.currentHeight+1, leaderLastHeight)
+			if er != nil {
+				logger.Error("recoverBackwardBlocks error", zap.Error(er))
+				return err
 			}
 		}
 	}
@@ -203,6 +172,7 @@ func (n *node) handleBlockData(hei uint64, hs []byte, data []byte) bool {
 			if bytes.Equal(v.Hash, hs) && v.Code {
 				trueCount++
 			} else {
+				logger.Error("falseCount info", zap.Uint64("height", v.Height), zap.Int("hash compare", bytes.Compare(v.Hash, hs)), zap.Bool("code", v.Code))
 				falseCount++
 			}
 		}
@@ -258,7 +228,7 @@ func (n *node) getRPCClient() *grpc.ClientConn {
 			addr := n.cp.GetLeader()
 			ad := strings.Split(addr, ":")
 			leaderaddr := ad[0] + n.rpcPort
-			conn, err := grpc.Dial(leaderaddr, grpc.WithInsecure(), grpc.WithBlock())
+			conn, err := grpc.Dial(leaderaddr, grpc.WithInsecure())
 			if err != nil {
 				logger.Error("grpc Dial error", zap.Error(err))
 				continue
@@ -277,7 +247,7 @@ func (n *node) getMaxBlockHeightFromLeader(CConn *grpc.ClientConn) (uint64, erro
 
 	res, err := cc.GetMaxBlockNumber(ctx, &pb.ReqMaxBlockNumber{})
 	if err != nil {
-		logger.Error("Call HandleGetLeaderMaxBlockHeight error", zap.Error(err))
+		logger.Error("Call GetMaxBlockNumber error", zap.Error(err))
 		return 0, err
 	}
 
@@ -328,7 +298,7 @@ func (n *node) recoverBackwardBlocks(CConn *grpc.ClientConn, lo uint64, hi uint6
 			}
 			err = n.commitF(n.u, data)
 			if err != nil {
-				logger.Error("commit block error", zap.Error(err))
+				logger.Error("recoverBackwardBlocks commit block error", zap.Error(err))
 				return err
 			}
 			n.currentHeight = bc.Height

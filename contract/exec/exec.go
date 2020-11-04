@@ -43,6 +43,14 @@ func Balance(db store.DB, id string, addr string) (uint64, error) {
 	return binary.LittleEndian.Uint64(v), nil
 }
 
+func Precision(db store.DB, id string) (uint64, error) {
+	v, err := db.Get(pKey(id))
+	if err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint64(v), nil
+}
+
 func New(db store.DB, scs []*parser.Script, owner string) (*exec, error) {
 	mp := make(map[string]string)
 	for i, j := 0, len(scs); i < j; i++ {
@@ -79,10 +87,11 @@ func (e *exec) Flush() error {
 	return tx.Commit()
 }
 
-// new tokenId total_amount
+// new tokenId total_amount precision
 func deal0(db store.DB, executor string, mp map[string]string, sc *parser.Script) error {
 	arg0, _ := sc.Arguments()[0].Value().(string) // tokenId
 	arg1, _ := sc.Arguments()[1].Value().(uint64) // total_amount
+	arg2, _ := sc.Arguments()[2].Value().(uint64) // precision
 	{
 		k := aKey(arg0)
 		if _, ok := mp[string(k)]; ok {
@@ -103,6 +112,11 @@ func deal0(db store.DB, executor string, mp map[string]string, sc *parser.Script
 		binary.LittleEndian.PutUint64(buf, arg1)
 		mp[string(tKey(arg0, executor))] = string(buf)
 	}
+	{
+		buf := make([]byte, 8)
+		binary.LittleEndian.PutUint64(buf, arg2)
+		mp[string(pKey(arg0))] = string(buf)
+	}
 	mp[string(fKey(arg0, executor))] = string([]byte{0})
 	return nil
 }
@@ -118,6 +132,48 @@ func deal1(db store.DB, executor string, mp map[string]string, sc *parser.Script
 		}
 		if bytes.Compare(v, []byte(executor)) != 0 {
 			return errors.New("permission denied")
+		}
+	}
+	{
+		var c, t uint64
+
+		{
+			k := tKey(arg0, executor)
+			if v, ok := mp[string(k)]; ok {
+				t = binary.LittleEndian.Uint64([]byte(v))
+			} else {
+				w, err := db.Get(k)
+				switch {
+				case err == nil:
+					t = binary.LittleEndian.Uint64(w)
+				case err == store.NotExist:
+					t = 0
+				default:
+					return err
+				}
+			}
+		}
+		k := cKey(arg0, executor)
+		if v, ok := mp[string(k)]; ok {
+			c = binary.LittleEndian.Uint64([]byte(v))
+		} else {
+			w, err := db.Get(k)
+			switch {
+			case err == nil:
+				c = binary.LittleEndian.Uint64(w)
+			case err == store.NotExist:
+				c = 0
+			default:
+				return err
+			}
+		}
+		if int64(c) > int64(t)-int64(arg1) {
+			return errors.New("overflow")
+		}
+		{
+			buf := make([]byte, 8)
+			binary.LittleEndian.PutUint64(buf, c+arg1)
+			mp[string(cKey(arg0, executor))] = string(buf)
 		}
 	}
 	var b uint64
@@ -154,26 +210,30 @@ func deal2(db store.DB, executor string, mp map[string]string, sc *parser.Script
 	arg2, _ := sc.Arguments()[2].Value().(string) // address
 	{
 		k := aKey(arg0)
-		if _, err := db.Get(k); err != nil {
-			return err
-		}
-	}
-	{
-		k := fKey(arg0, executor)
-		if v, ok := mp[string(k)]; ok {
-			if bytes.Compare([]byte(v), []byte{1}) == 0 {
-				return errors.New("freezed")
-			}
-		} else {
-			w, err := db.Get(k)
-			if err != nil {
+		if _, ok := mp[string(k)]; !ok {
+			if _, err := db.Get(k); err != nil {
 				return err
 			}
-			if bytes.Compare(w, []byte{1}) == 0 {
-				return errors.New("freezed")
-			}
 		}
 	}
+	/*
+		{
+			k := fKey(arg0, executor)
+			if v, ok := mp[string(k)]; ok {
+				if bytes.Compare([]byte(v), []byte{1}) == 0 {
+					return errors.New("freezed")
+				}
+			} else {
+				w, err := db.Get(k)
+				if err != nil {
+					return err
+				}
+				if bytes.Compare(w, []byte{1}) == 0 {
+					return errors.New("freezed")
+				}
+			}
+		}
+	*/
 	{
 		k := bKey(arg0, executor)
 		if v, ok := mp[string(k)]; ok {
@@ -280,6 +340,15 @@ func bKey(id, addr string) []byte {
 	return buf.Bytes()
 }
 
+func pKey(id string) []byte {
+	var buf bytes.Buffer
+
+	buf.WriteString("p")
+	buf.WriteString("/")
+	buf.WriteString(id)
+	return buf.Bytes()
+}
+
 func fKey(id, addr string) []byte {
 	var buf bytes.Buffer
 
@@ -294,6 +363,16 @@ func tKey(id, addr string) []byte {
 	var buf bytes.Buffer
 
 	buf.WriteString("t")
+	buf.WriteString("/")
+	buf.WriteString(id)
+	buf.WriteString(addr)
+	return buf.Bytes()
+}
+
+func cKey(id, addr string) []byte {
+	var buf bytes.Buffer
+
+	buf.WriteString("c")
 	buf.WriteString("/")
 	buf.WriteString(id)
 	buf.WriteString(addr)

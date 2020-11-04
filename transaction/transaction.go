@@ -3,6 +3,7 @@ package transaction
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"kortho/types"
 	"kortho/util/miscellaneous"
 	"time"
@@ -25,6 +26,10 @@ const (
 	FreezeTag
 	// UnfreezeTag 解锁标记
 	UnfreezeTag
+	// ConvertPckTag 兑换pck标记
+	ConvertPckTag
+	// ConvertKtoTag 兑换kto标志
+	ConvertKtoTag
 )
 
 // AdminAddr 用来锁仓的管理员地址
@@ -33,37 +38,37 @@ var AdminAddr string
 // Transaction 交易信息
 type Transaction struct {
 	//Nonce 自增的正整数，同一地址当前交易必定比上次大一
-	Nonce uint64 `json:"nonce"`
+	Nonce uint64 `json:"nonce,omitempty"`
 
 	// BlockNumber 当前交易所在块的块高
-	BlockNumber uint64 `json:"blocknumber"`
+	BlockNumber uint64 `json:"blocknumber,omitempty"`
 
 	// Amount 交易的金额
-	Amount uint64 `json:"amount"`
+	Amount uint64 `json:"amount,omitempty"`
 
 	// From 交易的发起方地址
-	From types.Address `json:"from"`
+	From types.Address `json:"from,omitempty"`
 
 	// To 交易的接收方地址
 	To types.Address `json:"to"`
 
 	// Hash 交易hash
-	Hash []byte `json:"hash"`
+	Hash []byte `json:"hash,omitempty"`
 
 	// Signature 交易的签名
-	Signature []byte `json:"signature"`
+	Signature []byte `json:"signature,omitempty"`
 
 	// Time 发起交易的时间时间戳，以秒为单位
-	Time int64 `json:"time"`
+	Time int64 `json:"time,omitempty"`
 
 	// Root 交易的默克尔根，用来进行交易数据的快速对比
-	Root []byte `json:"root"`
+	Root []byte `json:"root,omitempty"`
 
 	// Sctipt 代币的名称，非代币交易该字符串长度为0
-	Script string `json:"script"`
+	Script string `json:"script,omitempty"`
 
 	// Fee 代币交易的手续费，如果不是代币交易，此项为0
-	Fee uint64 `json:"fee"`
+	Fee uint64 `json:"fee,omitempty"`
 
 	// Tag 用不同的数值，标记不同的交易类型
 	//	0：转账交易
@@ -73,7 +78,12 @@ type Transaction struct {
 	Tag int32 `json:"tag"`
 
 	// Order 交易中携带的订单数据，没有订单此项为nil
-	Order *Order `json:"ord"`
+	Order *Order `json:"ord,omitempty"`
+	// KtoNum
+	KtoNum uint64 `json:"ktonum"`
+
+	// PckNum
+	PckNum uint64 `json:"pcknum"`
 }
 
 // Option 创建交易时的可选参数
@@ -300,9 +310,13 @@ func (tx *Transaction) TrimmedCopy() *Transaction {
 }
 
 // Sign 用ed25519椭圆曲线签名算法，对交易进行签名
-func (tx *Transaction) Sign(privateKey []byte) {
+func (tx *Transaction) Sign(privateKey []byte) error {
+	if len(privateKey) != ed25519.PrivateKeySize {
+		return errors.New("invalid private key")
+	}
 	signatures := ed25519.Sign(ed25519.PrivateKey(privateKey), tx.Hash)
 	tx.Signature = signatures
+	return nil
 }
 
 // Verify 验证签名，成功返回true，否则返回false
@@ -310,12 +324,64 @@ func (tx *Transaction) Verify() bool {
 	txCopy := tx.TrimmedCopy()
 	txCopy.HashTransaction()
 	publicKey := tx.From.ToPublicKey()
+	if len(publicKey) != ed25519.PublicKeySize {
+		return false
+	}
 	return ed25519.Verify(publicKey, txCopy.Hash, tx.Signature)
 }
 
 // EqualNonce 当前交易与传入的交易的nonce相同返回ture，否则返回ture
 func (tx *Transaction) EqualNonce(transaction *Transaction) bool {
 	if tx.From == transaction.From && tx.Nonce == transaction.Nonce {
+		return true
+	}
+	return false
+}
+
+func (tx *Transaction) ConvertHash() {
+	nonce := miscellaneous.E64func(tx.Nonce)
+	timestamap := miscellaneous.E64func(uint64(tx.Time))
+	ktoNum := miscellaneous.E64func(tx.KtoNum)
+	pckNum := miscellaneous.E64func(tx.PckNum)
+	hashBytes := bytes.Join([][]byte{nonce, ktoNum, pckNum, tx.From[:], tx.To[:], timestamap}, []byte{})
+	hash := sha3.Sum256(hashBytes)
+	tx.Hash = hash[:]
+	return
+}
+
+func (tx *Transaction) ConvertCopy() *Transaction {
+	var from, to types.Address
+	copy(from[:], tx.From[:])
+	copy(to[:], tx.To[:])
+	return &Transaction{
+		Nonce:  tx.Nonce,
+		Time:   tx.Time,
+		PckNum: tx.PckNum,
+		KtoNum: tx.KtoNum,
+		From:   from,
+		To:     to,
+	}
+}
+
+func (tx *Transaction) ConvertVerify() bool {
+	txCopy := tx.ConvertCopy()
+	txCopy.ConvertHash()
+	publicKey := types.AddressToPublicKey(string(tx.From.Bytes()))
+	if len(publicKey) != ed25519.PublicKeySize {
+		return false
+	}
+	return ed25519.Verify(publicKey, txCopy.Hash, tx.Signature)
+}
+
+func (tx *Transaction) IsConvertPckTransaction() bool {
+	if tx.Tag == ConvertPckTag {
+		return true
+	}
+	return false
+}
+
+func (tx *Transaction) IsConvertKtoTransaction() bool {
+	if tx.Tag == ConvertKtoTag {
 		return true
 	}
 	return false

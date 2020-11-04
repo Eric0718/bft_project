@@ -15,6 +15,7 @@ type Node interface {
 	Run()
 	//add node into cluster.
 	Add(string) error
+	Remove(string) error
 }
 
 type bftnode struct {
@@ -31,17 +32,25 @@ type RequestManage struct {
 	bn *bftnode //bft node
 }
 
-//ReSBlockrpc result info
-type ReSBlockrpc struct {
-	Done      bool   //'true' requests successfully,'false' failed.
-	Data      []byte //blocks data
-	MaxHieght uint64 //leader max block height
+//ReqNodeOption request
+// type ReqNodeOption struct {
+// 	GetLeader bool
+// 	Addr      string //request address
+// }
+
+//ReqBlockrpc requests blocks from height 'LowH' to 'HeiH'.
+type ReqBlockrpc struct {
+	GetLeader    bool
+	Addr         string //request address
+	ReqMaxHeight bool   //request leader max block height
+	ReqBlocks    bool   //request leader blocks from height 'LowH' to 'HeiH'
+	LowH         uint64 //form LowH
+	HeiH         uint64 //to HeiH
 }
 
-//ReqBlockrpc request blocks from height 'LowH' to 'HeiH'.
-type ReqBlockrpc struct {
-	ReqHeight bool   //request leader max block height
-	ReqBlocks bool   //request leader blocks from height 'LowH' to 'HeiH'
-	LowH      uint64 //form LowH
-	HeiH      uint64 //to HeiH
+//ReSBlockrpc result info
+type ReSBlockrpc struct {
+	Data       []byte //blocks data
+	LeaderAddr string
+	MaxHieght  uint64 //leader max block height
 }

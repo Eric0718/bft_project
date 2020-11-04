@@ -26,7 +26,9 @@ message Tx {
   uint64 Fee = 10;
   bytes Root = 11;
   int32 Tag = 12;
-  order order = 13;
+  uint64 pckNum =13;
+  uint64 ktoNum =14;
+  order order = 15;
 }
 
 message res_tx { repeated Tx Txs = 1; }
@@ -126,6 +128,7 @@ message req_token_create {
   string symbol = 6;
   uint64 total = 7;
   uint64 fee = 8;
+  uint64 demic = 9;
 }
 message resp_token_create { string hash = 1; }
 
@@ -133,7 +136,10 @@ message req_token_balance {
   string address = 1;
   string symbol = 2;
 }
-message resp_token_balance { uint64 balnce = 1; }
+message resp_token_balance {
+  uint64 balnce = 1;
+  uint64 demic = 2;
+}
 
 message req_token_transaction {
   string from = 1;
@@ -144,8 +150,13 @@ message req_token_transaction {
   uint64 tokenAmount = 6;
   string symbol = 7;
   uint64 fee = 8;
+  int64 time = 9;
+  bytes hash = 10;
+  bytes signature = 11;
 }
 message resp_token_transaction { string hash = 1; }
+
+message req_token_transactions{ repeated req_token_transaction txs =1; }
 
 message freezeBalance {
   string address = 1;
@@ -155,10 +166,43 @@ message freezeBalance {
 message req_get_freeze_bal { repeated string addressList = 1; }
 message resp_get_freeze_bal { repeated freezeBalance results = 1; }
 
+message req_convert_pck {
+  string addr = 1;
+  string hash = 2;
+  string signature = 3;
+  int64 timestamp = 4;
+  uint64 nonce = 5;
+  uint64 ktoNum = 6;
+  uint64 pckNum = 7;
+}
+
+message req_pck_bal { string addr = 1; }
+message resp_pck_bal { uint64 num = 1; }
+
+message req_kto_num { string addr = 1; }
+message resp_kto_num { uint64 num = 1; }
+
+message req_convert_kto {
+  string addr = 1;
+  string hash = 2;
+  string signature = 3;
+  int64 timestamp = 4;
+  uint64 nonce = 5;
+  uint64 ktoNum = 6;
+  uint64 pckNum = 7;
+}
+
+message req_total_pck {}
+message resp_total_pck { uint64 total = 1; }
+
+message req_total_kto {}
+message resp_total_kto { uint64 delKto = 1; }
+
 service Greeter {
   rpc GetAddrByPriv(req_addr_by_priv) returns (resp_addr_by_priv) {}
   rpc GetBalance(req_balance) returns (res_balance) {}
   rpc GetBalanceToken(req_token_balance) returns (resp_token_balance) {}
+  rpc GetAvailableBalance(req_balance)returns (res_balance){}
   rpc GetFreezeBalance(req_get_freeze_bal) returns (resp_get_freeze_bal) {}
   rpc GetAddressNonceAt(req_nonce) returns (respose_nonce) {}
   rpc GetTxsByAddr(req_tx) returns (respose_txs) {}
@@ -166,6 +210,7 @@ service Greeter {
   rpc GetMaxBlockNumber(req_max_block_number) returns (resp_max_block_number) {}
   rpc GetBlockByNum(req_block_by_number) returns (resp_block) {}
   rpc GetBlockByHash(req_block_by_hash) returns (resp_block) {}
+
 
   rpc SendTransaction(req_transaction) returns (res_transaction) {}
   rpc SendTransactions(req_transactions) returns (resp_transactions) {}
@@ -178,10 +223,24 @@ service Greeter {
   rpc SendUnfreezeTransactions(req_signed_transactions)
       returns (resp_signed_transactions) {}
   rpc SendToken(req_token_transaction) returns (resp_token_transaction) {}
+  rpc SendSignedToken(req_token_transactions) returns (resp_signed_transactions) {}
 
   rpc CreateAddr(req_create_addr) returns (resp_create_addr) {}
   rpc CreateContract(req_token_create) returns (resp_token_create) {}
   rpc MintToken(req_token_create) returns (resp_token_create) {}
 
   rpc SignOrd(req_sign_ord) returns (resp_sign_ord) {}
+
+  // kto 兑换 pck
+  rpc ConvertPck(req_convert_pck) returns (hashMsg) {}
+  // pck 兑换 kto
+  rpc ConvertKto(req_convert_kto) returns (hashMsg) {}
+  // 查询某地址的pck余额
+  rpc GetPckNum(req_pck_bal) returns (resp_pck_bal) {}
+  //获取某地址注入了多少kto在资金池
+  rpc GetKtoNum(req_kto_num) returns (resp_kto_num) {}
+  //获取pck总数
+  rpc GetTotalPck(req_total_pck) returns (resp_total_pck) {}
+  //获取资金池中kto总数
+  rpc GetTotalKto(req_total_kto) returns (resp_total_kto) {}
 }

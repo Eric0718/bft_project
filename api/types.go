@@ -21,6 +21,9 @@ type Transaction struct {
 	Time        int64  `json:"time"`
 	Script      string `json:"script"`
 	Ord         *Order `json:"ord"`
+	Tag         int32  `json:"tag"`
+	KtoNum      uint64 `json:"ktonum"`
+	PckNum      uint64 `json:"pcknum"`
 }
 
 //Block 块的数据结构
@@ -56,6 +59,10 @@ func changeTransaction(tx *transaction.Transaction) (result Transaction) {
 	result.Signature = hex.EncodeToString(tx.Signature)
 	result.Time = tx.Time
 	result.BlockNumber = tx.BlockNumber
+	result.Script = tx.Script
+	result.Tag = tx.Tag
+	result.KtoNum = tx.KtoNum
+	result.PckNum = tx.PckNum
 
 	if tx.IsOrderTransaction() {
 		result.Ord.ID = string(tx.Order.ID)

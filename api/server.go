@@ -27,6 +27,7 @@ func (s *Server) Run() {
 	s.GET("/height", s.GetHeightHandler)
 	s.GET("/balance", s.GetBalanceHandler)
 	s.GET("/transaction", s.GetTransactionHandler)
+	s.GET("/token/demic", s.GetTokenDemicHandler)
 
 	if err := fasthttp.ListenAndServe(s.port, s.Handler); err != nil {
 		logger.Error("failed to listen port", zap.Error(err), zap.String("port", s.port))
@@ -72,8 +73,8 @@ func (s *Server) GetBalanceHandler(ctx *fasthttp.RequestCtx) {
 	ctx.Response.Header.Set("Content-Type", "application/json")
 	var result resultInfo
 	var balInfo struct {
-		name    string
-		balance uint64
+		Name    string
+		Balance uint64
 	}
 	defer func() {
 		jsbyte, _ := json.Marshal(result)
@@ -98,8 +99,8 @@ func (s *Server) GetBalanceHandler(ctx *fasthttp.RequestCtx) {
 			ctx.Response.SetStatusCode(http.StatusBadRequest)
 			return
 		}
-		balInfo.name = "Kto"
-		balInfo.balance = balance
+		balInfo.Name = "Kto"
+		balInfo.Balance = balance
 	} else {
 		balance, err := blockChian.GetTokenBalance(address, symbol)
 		if err != nil {
@@ -108,8 +109,8 @@ func (s *Server) GetBalanceHandler(ctx *fasthttp.RequestCtx) {
 			ctx.Response.SetStatusCode(http.StatusBadRequest)
 			return
 		}
-		balInfo.name = string(symbol)
-		balInfo.balance = balance
+		balInfo.Name = string(symbol)
+		balInfo.Balance = balance
 	}
 
 	result.Code = successCode
@@ -293,5 +294,32 @@ func (s *Server) GetTransactionHandler(ctx *fasthttp.RequestCtx) {
 	result.Code = successCode
 	result.Message = OK
 	ctx.Response.SetStatusCode(http.StatusOK)
+	return
+}
+
+// GetTokenDemicHandler 代币精度请求处理器
+func (s *Server) GetTokenDemicHandler(ctx *fasthttp.RequestCtx) {
+	ctx.Response.Header.Set("Access-Control-Allow-Origin", "*")
+	ctx.Response.Header.Set("Content-Type", "application/json")
+	var result resultInfo
+	defer func() {
+		jsbyte, _ := json.Marshal(result)
+		ctx.Write(jsbyte)
+	}()
+
+	args := ctx.QueryArgs()
+	symbol := args.Peek("symbol")
+
+	demic, err := blockChian.GetTokenDemic(symbol)
+	if err != nil {
+		logger.Error("GetTokenDemic", zap.String("symbol", string(symbol)))
+		result.Code = failedCode
+		result.Message = ErrParameters
+		return
+	}
+
+	result.Code = successCode
+	result.Message = OK
+	result.Data = demic
 	return
 }

@@ -192,7 +192,9 @@ func (c *CLI) freezeBalance(freezeTransaction string) {
 		log.Panic(err)
 	}
 
-	fmt.Printf("transaction hash:%s\n", txResp.HashList)
+	for _, v := range txResp.HashList {
+		fmt.Printf("code:%d,msg:%s,hash:%s\n", v.Code, v.Message, v.Hash)
+	}
 }
 
 func (c *CLI) getFreezeBalance(address string) {
@@ -253,5 +255,7 @@ func (c *CLI) unFreezeTransaction(unfreezeTransaction string) {
 		log.Panic(err)
 	}
 
-	fmt.Printf("transaction hash:%s\n", txResp.HashList)
+	for _, v := range txResp.HashList {
+		fmt.Printf("code:%d,msg:%s,hash:%s\n", v.Code, v.Message, v.Hash)
+	}
 }

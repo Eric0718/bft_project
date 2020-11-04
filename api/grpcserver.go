@@ -91,6 +91,8 @@ func txToMsgTxAndOrder(tx *transaction.Transaction) (msgTx message.Tx) {
 	msgTx.Fee = tx.Fee
 	msgTx.Root = tx.Root
 	msgTx.Tag = tx.Tag
+	msgTx.PckNum = tx.PckNum
+	msgTx.KtoNum = tx.KtoNum
 
 	if tx.IsOrderTransaction() {
 		msgTx.Order = &message.Order{}
@@ -115,6 +117,11 @@ func txToMsgTx(tx *transaction.Transaction) (msgTx message.Tx) {
 	msgTx.Signature = hex.EncodeToString(tx.Signature)
 	msgTx.Time = tx.Time
 	msgTx.Script = tx.Script
+	msgTx.Fee = tx.Fee
+	msgTx.Root = tx.Root
+	msgTx.Tag = tx.Tag
+	msgTx.PckNum = tx.PckNum
+	msgTx.KtoNum = tx.KtoNum
 	return msgTx
 }
 
@@ -156,8 +163,11 @@ func MsgTxToTx(msgTx *message.Tx) (*transaction.Transaction, error) {
 	tx.Root = msgTx.Root
 	tx.Tag = msgTx.Tag
 
-	if msgTx.Order != nil && len(msgTx.Signature) > 0 {
-		tx.Order.ID = []byte(msgTx.Order.Id)
+	tx.Order = &transaction.Order{}
+	if msgTx.Order != nil && len(msgTx.Signature) > 0 && len(msgTx.Order.Signature) > 0 {
+		if len(msgTx.Order.Id) > 0 {
+			tx.Order.ID = []byte(msgTx.Order.Id)
+		}
 
 		ad, err := types.StringToAddress(msgTx.Order.Address)
 		if err != nil {
@@ -195,6 +205,20 @@ func (g *Greeter) GetBalance(ctx context.Context, in *message.ReqBalance) (*mess
 		logger.Error("g.Bc.GetBalance", zap.Error(err), zap.String("address", in.Address))
 	}
 	return &message.ResBalance{Balnce: balance}, nil
+}
+
+func (g *Greeter) GetAvailableBalance(ctx context.Context, in *message.ReqBalance) (*message.ResBalance, error) {
+
+	balance, err := g.Bc.GetBalance([]byte(in.Address))
+	if err != nil {
+		logger.Error("g.Bc.GetBalance", zap.Error(err), zap.String("address", in.Address))
+	}
+
+	frozenBal, err := g.Bc.GetFreezeBalance([]byte(in.Address))
+	if err != nil {
+		logger.Error("g.Bc.GetFreezeBalance", zap.Error(err), zap.String("address", in.Address))
+	}
+	return &message.ResBalance{Balnce: balance - frozenBal}, nil
 }
 
 // GetBlockByNum 通过块高获取块数据
@@ -351,7 +375,11 @@ func (g *Greeter) SendTransaction(ctx context.Context, in *message.ReqTransactio
 			tx.Order.Tradename = in.Order.Tradename
 		}
 	}
-	tx.Sign(priv)
+
+	if err := tx.Sign(priv); err != nil {
+		logger.Error("failed to sign transaction", zap.Error(err))
+		return nil, grpc.Errorf(codes.InvalidArgument, "data error")
+	}
 
 	if err := g.tp.Add(tx, g.Bc); err != nil {
 		logger.Error("failed to add txpool", zap.Error(err))
@@ -433,7 +461,10 @@ func (g *Greeter) SendTransactions(ctx context.Context, in *message.ReqTransacti
 				tx.Order.Tradename = v.Order.Tradename
 			}
 		}
-		tx.Sign(priv)
+		if err := tx.Sign(priv); err != nil {
+			logger.Error("failed to sign transaction", zap.Error(err))
+			return nil, grpc.Errorf(codes.InvalidArgument, "data error")
+		}
 
 		if err := g.tp.Add(tx, g.Bc); err != nil {
 			logger.Error("failed to add txpool", zap.Error(err))
@@ -582,17 +613,42 @@ func (g *Greeter) CreateContract(ctx context.Context, in *message.ReqTokenCreate
 		return nil, grpc.Errorf(codes.InvalidArgument, "private key:%s", in.Priv)
 	}
 
+	if len(in.Symbol) == 0 {
+		logger.Info("symbol", zap.String("symbol", in.Symbol))
+		return nil, grpc.Errorf(codes.InvalidArgument, "symbol:%s", in.Symbol)
+	}
+
 	//"new \"abc\" 1000000000"
 	At := strconv.FormatUint(in.Total, 10)
 	//script := "new" + '\"' + in.Symbol +'\"' + in.Total
 
-	script := fmt.Sprintf("new \"%s\" %s", in.Symbol, At)
+	var minDemic uint64 = 6
+	var maxDemic uint64 = 10
 
+	if in.Demic < 6 {
+		in.Demic = minDemic
+	} else if in.Demic > maxDemic {
+		return nil, grpc.Errorf(codes.InvalidArgument, "invalid demic:%d", in.Demic)
+	}
+
+	script := fmt.Sprintf("new \"%s\" %s %d", in.Symbol, At, in.Demic)
+	logger.Debug("script info", zap.String("script", script))
 	//tx := transaction.Newtoken(in.Nonce, uint64(500001), in.Fee, *from, *to, script)
 	//TODO:transaction.WithToken(in.Fee, script, []byte{}) 把空的字节切片换成root
-	tx := transaction.ZNewTransaction(in.Nonce, uint64(500001), *from, *to,
-		transaction.WithToken(in.Fee, script, []byte{}))
-	tx.Sign(priv)
+	root, err := g.Bc.GetTokenRoot(from.String(), script)
+	if err != nil {
+		logger.Error("failed to get token root", zap.String("from", from.String()),
+			zap.String("script", script))
+		return nil, grpc.Errorf(codes.InvalidArgument, "get root failed")
+	}
+
+	tx := transaction.ZNewTransaction(in.Nonce, in.Amount, *from, *to,
+		transaction.WithToken(in.Fee, script, root))
+
+	if err := tx.Sign(priv); err != nil {
+		logger.Error("failed to sign transaction", zap.Error(err))
+		return nil, grpc.Errorf(codes.InvalidArgument, "data error")
+	}
 
 	if err := g.tp.Add(tx, g.Bc); err != nil {
 		logger.Error("g.tp.Add", zap.Error(err))
@@ -631,17 +687,30 @@ func (g *Greeter) MintToken(ctx context.Context, in *message.ReqTokenCreate) (*m
 		return nil, grpc.Errorf(codes.InvalidArgument, "private key:%s", in.Priv)
 	}
 
+	if len(in.Symbol) == 0 {
+		logger.Info("symbol", zap.String("symbol", in.Symbol))
+		return nil, grpc.Errorf(codes.InvalidArgument, "symbol:%s", in.Symbol)
+	}
 	//"new \"abc\" 1000000000"
 	At := strconv.FormatUint(in.Total, 10)
 	//script := "new" + '\"' + in.Symbol +'\"' + in.Total
-
 	script := fmt.Sprintf("mint \"%s\" %s", in.Symbol, At)
 	//tx := transaction.Newtoken(in.Nonce, uint64(500001), in.Fee, *from, *to, script)
 	//TODO:transaction.WithToken(in.Fee, script, []byte{}) 把空的字节切片换成root
-	tx := transaction.ZNewTransaction(in.Nonce, uint64(500001), *from, *to,
-		transaction.WithToken(in.Fee, script, []byte{}))
+	root, err := g.Bc.GetTokenRoot(from.String(), script)
+	if err != nil {
+		logger.Error("failed to get token root", zap.String("from", from.String()),
+			zap.String("script", script))
+		return nil, grpc.Errorf(codes.InvalidArgument, "get root failed")
+	}
 
-	tx.Sign(priv)
+	tx := transaction.ZNewTransaction(in.Nonce, in.Amount, *from, *to,
+		transaction.WithToken(in.Fee, script, root))
+
+	if err := tx.Sign(priv); err != nil {
+		logger.Error("failed to sign transaction", zap.Error(err))
+		return nil, grpc.Errorf(codes.InvalidArgument, "data error")
+	}
 
 	if err := g.tp.Add(tx, g.Bc); err != nil {
 		logger.Error("g.tp.Add", zap.Error(err))
@@ -679,6 +748,10 @@ func (g *Greeter) SendToken(ctx context.Context, in *message.ReqTokenTransaction
 		return nil, grpc.Errorf(codes.InvalidArgument, "priv:%s", in.Priv)
 	}
 
+	if len(in.Symbol) == 0 {
+		logger.Info("symbol", zap.String("symbol", in.Symbol))
+		return nil, grpc.Errorf(codes.InvalidArgument, "symbol:%s", in.Symbol)
+	}
 	At := strconv.FormatUint(in.TokenAmount, 10)
 	//"transfer \"abc\" 10 \"to\""
 	script := fmt.Sprintf("transfer \"%s\" %s \"%s\"", in.Symbol, At, in.To)
@@ -688,9 +761,15 @@ func (g *Greeter) SendToken(ctx context.Context, in *message.ReqTokenTransaction
 	if err != nil {
 		logger.Error("Failed to get token root", zap.String("from", from.String()),
 			zap.String("script", script))
+		return nil, grpc.Errorf(codes.InvalidArgument, "get root failed")
 	}
-	tx := transaction.ZNewTransaction(in.Nonce, 500001, *from, *to, transaction.WithToken(in.Fee, script, root))
-	tx.Sign(priv)
+
+	tx := transaction.ZNewTransaction(in.Nonce, in.Amount, *from, *to, transaction.WithToken(in.Fee, script, root))
+
+	if err := tx.Sign(priv); err != nil {
+		logger.Error("failed to sign transaction", zap.Error(err))
+		return nil, grpc.Errorf(codes.InvalidArgument, "data error")
+	}
 
 	if err := g.tp.Add(tx, g.Bc); err != nil {
 		logger.Error("Failed to add transaction", zap.Error(err))
@@ -703,6 +782,90 @@ func (g *Greeter) SendToken(ctx context.Context, in *message.ReqTokenTransaction
 	return &message.RespTokenTransaction{Hash: hash}, nil
 }
 
+//
+func (g *Greeter) SendSignedToken(ctx context.Context, in *message.ReqTokenTransactions) (*message.RespSignedTransactions, error) {
+	var hashList []*message.HashMsg
+	for _, reqTx := range in.Txs {
+
+		if reqTx.From == reqTx.To {
+			logger.Info("From and To are the same", zap.String("from", reqTx.From), zap.String("to", reqTx.To))
+			msg := message.HashMsg{Code: -1, Message: "from and to verify failed", Hash: hex.EncodeToString(reqTx.Hash)}
+			hashList = append(hashList, &msg)
+			continue
+		}
+
+		from, err := types.StringToAddress(reqTx.From)
+		if err != nil {
+			logger.Error("Parameters error", zap.String("from", reqTx.From), zap.String("to", reqTx.To))
+			msg := message.HashMsg{Code: -1, Message: "from addresss verification failed", Hash: hex.EncodeToString(reqTx.Hash)}
+			hashList = append(hashList, &msg)
+			continue
+		}
+
+		to, err := types.StringToAddress(reqTx.To)
+		if err != nil {
+			logger.Error("Parameters error", zap.String("from", reqTx.From), zap.String("to", reqTx.To))
+			msg := message.HashMsg{Code: -1, Message: "to address verification failed", Hash: hex.EncodeToString(reqTx.Hash)}
+			hashList = append(hashList, &msg)
+			continue
+		}
+
+		if len(reqTx.Symbol) == 0 {
+			logger.Info("symbol", zap.String("symbol", reqTx.Symbol))
+			return nil, grpc.Errorf(codes.InvalidArgument, "symbol:%s", reqTx.Symbol)
+		}
+
+		At := strconv.FormatUint(reqTx.TokenAmount, 10)
+		//"transfer \"abc\" 10 \"to\""
+		script := fmt.Sprintf("transfer \"%s\" %s \"%s\"", reqTx.Symbol, At, reqTx.To)
+		//tx = tx.NewTransaction(reqTx.Nonce, reqTx.Amount, from, to, script)
+
+		root, err := g.Bc.GetTokenRoot(from.String(), script)
+		if err != nil {
+			logger.Error("Failed to get token root", zap.String("from", from.String()),
+				zap.String("script", script))
+			msg := message.HashMsg{Code: -1, Message: "failed to get root", Hash: hex.EncodeToString(reqTx.Hash)}
+			hashList = append(hashList, &msg)
+			continue
+		}
+		// tx := transaction.ZNewTransaction(reqTx.Nonce, reqTx.Amount, *from, *to, transaction.WithToken(reqTx.Fee, script, root))
+		// tx.Sign(priv)
+
+		tx := transaction.Transaction{
+			From:      *from,
+			To:        *to,
+			Nonce:     reqTx.Nonce,
+			Amount:    reqTx.Amount,
+			Fee:       reqTx.Fee,
+			Script:    script,
+			Root:      root,
+			Signature: reqTx.Signature,
+			Hash:      reqTx.Hash,
+			Time:      reqTx.Time,
+		}
+
+		if !tx.Verify() {
+			logger.Error("failed to verify transation", zap.Error(errors.New("signature verification failed")))
+			msg := message.HashMsg{Code: -1, Message: "sign verification failed", Hash: hex.EncodeToString(reqTx.Hash)}
+			hashList = append(hashList, &msg)
+			continue
+		}
+
+		if err := g.tp.Add(&tx, g.Bc); err != nil {
+			logger.Error("Failed to add transaction", zap.Error(err), zap.String("from", reqTx.From), zap.Uint64("nonce", reqTx.Nonce))
+			msg := message.HashMsg{Code: -1, Message: "add txpool failed", Hash: hex.EncodeToString(reqTx.Hash)}
+			hashList = append(hashList, &msg)
+			continue
+		}
+
+		g.n.Broadcast(tx)
+		msg := message.HashMsg{Code: 0, Message: "ok", Hash: hex.EncodeToString(tx.Hash)}
+		hashList = append(hashList, &msg)
+	}
+
+	return &message.RespSignedTransactions{HashList: hashList}, nil
+}
+
 // GetBalanceToken 获取address对应代币的余额，Symbol为代币名称
 func (g *Greeter) GetBalanceToken(ctx context.Context, in *message.ReqTokenBalance) (*message.RespTokenBalance, error) {
 	balance, err := g.Bc.GetTokenBalance([]byte(in.Address), []byte(in.Symbol))
@@ -710,7 +873,14 @@ func (g *Greeter) GetBalanceToken(ctx context.Context, in *message.ReqTokenBalan
 		logger.Error("g.Bc.GetTokenBalance", zap.Error(err), zap.String("address", in.Address), zap.String("symbol", in.Symbol))
 		return nil, grpc.Errorf(codes.InvalidArgument, "symbol:\"%s\",address:%s", in.Symbol, in.Address)
 	}
-	return &message.RespTokenBalance{Balnce: balance}, nil
+
+	demic, err := g.Bc.GetTokenDemic([]byte(in.Symbol))
+	if err != nil {
+		logger.Error("get demic:", zap.String("symbol", in.Symbol), zap.Error(err))
+		return nil, grpc.Errorf(codes.InvalidArgument, "symbol:\"%s\",address:%s", in.Symbol, in.Address)
+	}
+
+	return &message.RespTokenBalance{Balnce: balance, Demic: demic}, nil
 }
 
 // CreateAddr 在线创建地址和私钥
@@ -725,7 +895,6 @@ func (g *Greeter) GetMaxBlockNumber(ctx context.Context, in *message.ReqMaxBlock
 	maxNumber, err := g.Bc.GetMaxBlockHeight()
 	if err != nil {
 		logger.Error("g.Bc.GetMaxBlockHeight", zap.Error(err))
-		//TODO:如何保证数据库中确实是不存在块高？
 		return &message.RespMaxBlockNumber{MaxNumber: 0}, nil
 	}
 	return &message.RespMaxBlockNumber{MaxNumber: maxNumber}, nil
@@ -934,4 +1103,135 @@ func (g *Greeter) GetFreezeBalance(ctx context.Context, in *message.ReqGetFreeze
 	}
 
 	return &resp, nil
+}
+
+func (s *Greeter) ConvertPck(ctx context.Context, in *message.ReqConvertPck) (*message.HashMsg, error) {
+
+	from, err := types.StringToAddress(in.Addr)
+	if err != nil {
+		return &message.HashMsg{Code: -1, Message: "invalid address"}, err
+	}
+
+	hash, err := hex.DecodeString(in.Hash)
+	if err != nil {
+		return &message.HashMsg{Code: -1, Message: "invalid hash"}, nil
+	}
+
+	signature, err := hex.DecodeString(in.Signature)
+	if err != nil {
+		return &message.HashMsg{Code: -1, Message: "invalid signature"}, nil
+	}
+
+	if in.PckNum <= 0 || in.KtoNum <= 0 {
+		return &message.HashMsg{Code: -1, Message: "invalid number"}, nil
+	}
+
+	tx := &transaction.Transaction{
+		From:      *from,
+		To:        *(new(types.Address)),
+		Nonce:     in.Nonce,
+		Hash:      hash,
+		Signature: signature,
+		Time:      in.Timestamp,
+		KtoNum:    in.KtoNum,
+		PckNum:    in.PckNum,
+		Tag:       transaction.ConvertPckTag,
+	}
+
+	if !tx.ConvertVerify() {
+		return &message.HashMsg{Code: -1, Message: "failed to verify signature"}, nil
+	}
+
+	if err := s.tp.Add(tx, s.Bc); err != nil {
+		logger.Error("failed to add tx", zap.Error(err))
+		return &message.HashMsg{Code: -1, Message: "invalid parameters"}, nil
+	}
+	s.n.Broadcast(tx)
+
+	return &message.HashMsg{Code: 0, Message: "ok", Hash: hex.EncodeToString(tx.Hash)}, nil
+}
+
+func (s *Greeter) ConvertKto(ctx context.Context, in *message.ReqConvertKto) (*message.HashMsg, error) {
+	from, err := types.StringToAddress(in.Addr)
+	if err != nil {
+		return &message.HashMsg{Code: -1, Message: "invalid address"}, err
+	}
+
+	hash, err := hex.DecodeString(in.Hash)
+	if err != nil {
+		return &message.HashMsg{Code: -1, Message: "invalid hash"}, nil
+	}
+
+	signature, err := hex.DecodeString(in.Signature)
+	if err != nil {
+		return &message.HashMsg{Code: -1, Message: "invalid signature"}, nil
+	}
+
+	if in.PckNum <= 0 || in.KtoNum <= 0 {
+		return &message.HashMsg{Code: -1, Message: "invalid number"}, nil
+	}
+
+	tx := &transaction.Transaction{
+		From:      *from,
+		To:        *(new(types.Address)),
+		Nonce:     in.Nonce,
+		Hash:      hash,
+		Signature: signature,
+		Time:      in.Timestamp,
+		KtoNum:    in.KtoNum,
+		PckNum:    in.PckNum,
+		Tag:       transaction.ConvertKtoTag,
+	}
+
+	if !tx.ConvertVerify() {
+		return &message.HashMsg{Code: -1, Message: "failed to verify signature"}, nil
+	}
+
+	if err := s.tp.Add(tx, s.Bc); err != nil {
+		return &message.HashMsg{Code: -1, Message: "invalid parameters"}, nil
+	}
+	s.n.Broadcast(tx)
+
+	return &message.HashMsg{Code: 0, Message: "ok", Hash: hex.EncodeToString(tx.Hash)}, nil
+}
+
+func (s *Greeter) GetPckNum(ctx context.Context, in *message.ReqPckBal) (*message.RespPckBal, error) {
+	addr, err := types.StringToAddress(in.Addr)
+	if err != nil {
+		return nil, grpc.Errorf(codes.InvalidArgument, "invalid address")
+	}
+	num, err := s.Bc.GetPck(addr.Bytes())
+	if err != nil {
+		return nil, grpc.Errorf(codes.Internal, "try again later")
+	}
+	return &message.RespPckBal{Num: num}, nil
+}
+
+func (s *Greeter) GetKtoNum(ctx context.Context, in *message.ReqKtoNum) (*message.RespKtoNum, error) {
+	addr, err := types.StringToAddress(in.Addr)
+	if err != nil {
+		return nil, grpc.Errorf(codes.InvalidArgument, "invalid address")
+	}
+
+	num, err := s.Bc.GetDKto(addr.Bytes())
+	if err != nil {
+		return nil, grpc.Errorf(codes.Internal, "try again later")
+	}
+	return &message.RespKtoNum{Num: num}, nil
+}
+
+func (s *Greeter) GetTotalPck(ctx context.Context, in *message.ReqTotalPck) (*message.RespTotalPck, error) {
+	total, err := s.Bc.GetPckTotal()
+	if err != nil {
+		return nil, grpc.Errorf(codes.Internal, "try again later")
+	}
+	return &message.RespTotalPck{Total: total}, nil
+}
+
+func (s *Greeter) GetTotalKto(ctx context.Context, in *message.ReqTotalKto) (*message.RespTotalKto, error) {
+	total, err := s.Bc.GetDKtoTotal()
+	if err != nil {
+		return nil, grpc.Errorf(codes.Internal, "try again later")
+	}
+	return &message.RespTotalKto{DelKto: total}, nil
 }

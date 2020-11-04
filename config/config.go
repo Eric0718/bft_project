@@ -12,8 +12,9 @@ type CfgInfo struct {
 	P2PConfigList []*P2PConfigInfo `yaml:"p2pconfig"`
 	//	P2PTxConfig     *P2PTxConfigInfo     `yaml:"p2pTxconfig"`
 	//ConsensusConfig *ConsensusConfigInfo `yaml:"consensusconfig"`
-	APIConfig *APIConfigInfo `yaml:"apiconfig"`
-	BFTConfig *BftConfig     `yaml:"bftconfig"`
+	APIConfig  *APIConfigInfo `yaml:"apiconfig"`
+	BFTConfig  *BftConfig     `yaml:"bftconfig"`
+	MonitorCfg *MonitorConfig `yaml:"monitorconfig"`
 }
 
 type LogConfigInfo struct {
@@ -92,9 +93,8 @@ type BftConfig struct {
 	HttpAddr         string   `yaml:"httpaddr"`
 	NodeAddr         string   `yaml:"nodeaddr"`
 	CountAddr        string   `yaml:"countaddr"`
-	RpcAddr          string   `yaml:"rpcaddr"`
+	MRpcAddr         string   `yaml:"mrpcaddr"`
 	RpcPort          string   `yaml:"rpcport"`
-	RecPort          string   `yaml:"recport"`
 	Join             bool     `yaml:"join"`
 	SnapshotCount    uint64   `yaml:"snapshotcount"`
 	SnapshotInterval uint64   `yaml:"snapshotinterval"`
@@ -112,8 +112,15 @@ type BftConfig struct {
 	LogFileSize      int64    `yaml:"logfilesize"`
 }
 
-// Config 配置信息
-var Config CfgInfo
+type MonitorConfig struct {
+	StartBlockHeight uint64   `yaml:"startBlockHeight"`
+	MPeer            string   `yaml:"mpeer"`
+	MPeers           []string `yaml:"mpeers"`
+	GrpcPort         string   `yaml:"grpcport"`
+	RpcPort          string   `yaml:"rpcport"`
+	RaftPort         string   `yaml:"raftport"`
+	AccountAddr      string   `yaml:"accountAddr"`
+}
 
 // LoadConfig 加载配置信息
 func LoadConfig() (*CfgInfo, error) {
@@ -127,7 +134,7 @@ func LoadConfig() (*CfgInfo, error) {
 	if err := viper.Unmarshal(&cfg); err != nil {
 		return nil, err
 	}
-	fmt.Printf("%+v\n", cfg)
+	fmt.Printf("config info: %+v\n", cfg)
 
 	return &cfg, nil
 }

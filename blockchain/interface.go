@@ -31,4 +31,12 @@ type Blockchains interface {
 	CalculationResults(block *block.Block) ([]byte, error)
 	CheckResults(block *block.Block, resultHash, Ds, Cm, qtj []byte) bool
 	GetBlockSection(lowH, heiH uint64) ([]*block.Block, error)
+
+	//pck操作
+	GetPckTotal() (uint64, error)
+	GetDKtoTotal() (uint64, error)
+	GetDKto(addr []byte) (uint64, error)
+	GetPck(addr []byte) (uint64, error)
+
+	GetTokenDemic(symbol []byte) (uint64, error)
 }

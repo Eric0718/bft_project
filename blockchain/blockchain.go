@@ -18,6 +18,7 @@ import (
 	"kortho/util/store"
 	"kortho/util/store/bg"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +33,10 @@ const (
 	ContractDBName = "contract.db"
 )
 
+const (
+	MAXUINT64 = ^uint64(0)
+)
+
 var (
 	// HeightKey 数据库中存储高度的键
 	HeightKey = []byte("height")
@@ -39,6 +44,13 @@ var (
 	NonceKey = []byte("nonce")
 	//FreezeKey 冻结金额的map名
 	FreezeKey = []byte("freeze")
+
+	//BheightKey = []byte("bheight")
+
+	dKtoPrefix    = "dk"
+	pckPrefix     = "pck"
+	PckTotalName  = "pcktotal"
+	DKtoTotalName = "dktototal"
 )
 
 var (
@@ -55,6 +67,11 @@ type Blockchain struct {
 	mu  sync.RWMutex
 	db  store.DB
 	cdb store.DB
+}
+
+type TXindex struct {
+	Height uint64
+	Index  uint64
 }
 
 // New 创建区块链对象
@@ -95,6 +112,15 @@ func (bc *Blockchain) NewBlock(txs []*transaction.Transaction, minaddr, Ds, Cm, 
 
 	//出币分配
 	txs = Distr(txs, minaddr, Ds, Cm, QTJ, height)
+
+	/* 	//锁仓收益分红规则，社区分配收益到链上执行，每天执行一次
+	   	//分配锁仓收益
+	   	if height%24*60*60 == 0 {
+	   		err := bc.ShareOutBouns(txs)
+	   		if err != nil {
+	   			logger.Error("failed from shareoutbouns to do :", zap.Error(err))
+	   		}
+	   	} */
 	//生成默克尔根,如果没有交易的话，调用GetMtHash会painc
 	txBytesList := make([][]byte, 0, len(txs))
 	for _, tx := range txs {
@@ -137,7 +163,7 @@ func (bc *Blockchain) AddBlock(block *block.Block, minaddr []byte) error {
 
 	height = prevHeight + 1
 	if block.Height != height {
-		return fmt.Errorf("height error:previous height=%d,current height=%d", prevHeight, height)
+		return fmt.Errorf("height error:current height=%d,commit height=%d", prevHeight, block.Height)
 	}
 
 	//高度->哈希
@@ -157,9 +183,22 @@ func (bc *Blockchain) AddBlock(block *block.Block, minaddr []byte) error {
 	DBTransaction.Del(HeightKey)
 	DBTransaction.Set(HeightKey, miscellaneous.E64func(height))
 
-	for _, tx := range block.Transactions {
+	// 获取pck和dkto的总数
+	pckTotal, err := getPckTotal(DBTransaction)
+	if err != nil {
+		logger.Error("failed to get total of pck")
+		return err
+	}
+
+	dKtoTotal, err := getDKtoTotal(DBTransaction)
+	if err != nil {
+		logger.Error("failed to get total of dkto")
+		return err
+	}
+
+	for index, tx := range block.Transactions {
 		if tx.IsCoinBaseTransaction() {
-			if err = setTxbyaddr(DBTransaction, tx.To.Bytes(), *tx); err != nil {
+			if err = setTxbyaddrKV(DBTransaction, tx.To.Bytes(), *tx, uint64(index)); err != nil {
 				logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
 					zap.Uint64("amount", tx.Amount))
 				return err
@@ -170,14 +209,14 @@ func (bc *Blockchain) AddBlock(block *block.Block, minaddr []byte) error {
 					zap.Uint64("amount", tx.Amount))
 				return err
 			}
-		} else if !tx.IsTransferTrasnaction() {
-			if err := setTxbyaddr(DBTransaction, tx.From.Bytes(), *tx); err != nil {
+		} else if tx.IsFreezeTransaction() || tx.IsUnfreezeTransaction() {
+			if err := setTxbyaddrKV(DBTransaction, tx.From.Bytes(), *tx, uint64(index)); err != nil {
 				logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
 					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
 				return err
 			}
 
-			if err := setTxbyaddr(DBTransaction, tx.To.Bytes(), *tx); err != nil {
+			if err := setTxbyaddrKV(DBTransaction, tx.To.Bytes(), *tx, uint64(index)); err != nil {
 				logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
 					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
 				return err
@@ -193,6 +232,9 @@ func (bc *Blockchain) AddBlock(block *block.Block, minaddr []byte) error {
 			frozenBal, _ := bc.getFreezeBalance(tx.To.Bytes())
 			if tx.IsFreezeTransaction() {
 				frozenBalBytes = miscellaneous.E64func(tx.Amount + frozenBal)
+				/* 			//投票记录处理
+				vote := NewVote(tx)
+				SetVote(*vote, DBTransaction) */
 			} else {
 				frozenBalBytes = miscellaneous.E64func(frozenBal - tx.Amount)
 			}
@@ -200,6 +242,48 @@ func (bc *Blockchain) AddBlock(block *block.Block, minaddr []byte) error {
 				logger.Error("Faile to freeze balance", zap.String("address", tx.To.String()),
 					zap.Uint64("amount", tx.Amount))
 				return err
+			}
+		} else if tx.IsConvertPckTransaction() || tx.IsConvertKtoTransaction() {
+			if err := setTxbyaddrKV(DBTransaction, tx.From.Bytes(), *tx, uint64(index)); err != nil {
+				logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
+					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+				return err
+			}
+
+			//更新nonce,block中txs必须是有序的
+			nonce := tx.Nonce + 1
+			if err := setNonce(DBTransaction, tx.From.Bytes(), miscellaneous.E64func(nonce)); err != nil {
+				logger.Error("Failed to set nonce", zap.Error(err), zap.String("from address", tx.From.String()),
+					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+				return err
+			}
+
+			if tx.IsConvertPckTransaction() {
+				if err := setConvertPck(DBTransaction, tx.From.Bytes(), tx.KtoNum, tx.PckNum); err != nil {
+					logger.Error("Failed to set pck", zap.Error(err), zap.String("from address", tx.From.String()),
+						zap.Uint64("pck", tx.PckNum), zap.Uint64("dkto", tx.KtoNum))
+					return err
+				}
+
+				if util.Uint64AddOverflow(pckTotal, tx.PckNum) && util.Uint64AddOverflow(dKtoTotal, tx.KtoNum) {
+					logger.Error("faile to verify total")
+					return errors.New("uint64 overflow")
+				}
+				pckTotal += tx.PckNum
+				dKtoTotal += tx.KtoNum
+			} else {
+				if err := setConvertKto(DBTransaction, tx.From.Bytes(), tx.KtoNum, tx.PckNum); err != nil {
+					logger.Error("Failed to set dkto", zap.Error(err), zap.String("from address", tx.From.String()),
+						zap.Uint64("pck", tx.PckNum), zap.Uint64("dkto", tx.KtoNum))
+					return err
+				}
+				if pckTotal < tx.PckNum && dKtoTotal < tx.KtoNum {
+					logger.Error("faile to verify total")
+					return errors.New("uint64 overflow")
+				}
+				pckTotal -= tx.PckNum
+				dKtoTotal -= tx.KtoNum
+
 			}
 		} else {
 			if tx.IsTokenTransaction() {
@@ -224,13 +308,13 @@ func (bc *Blockchain) AddBlock(block *block.Block, minaddr []byte) error {
 				}
 			}
 
-			if err := setTxbyaddr(DBTransaction, tx.From.Bytes(), *tx); err != nil {
+			if err := setTxbyaddrKV(DBTransaction, tx.From.Bytes(), *tx, uint64(index)); err != nil {
 				logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
 					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
 				return err
 			}
 
-			if err := setTxbyaddr(DBTransaction, tx.To.Bytes(), *tx); err != nil {
+			if err := setTxbyaddrKV(DBTransaction, tx.To.Bytes(), *tx, uint64(index)); err != nil {
 				logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
 					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
 				return err
@@ -252,11 +336,23 @@ func (bc *Blockchain) AddBlock(block *block.Block, minaddr []byte) error {
 			}
 		}
 
-		if err := setTxList(DBTransaction, tx); err != nil {
-			logger.Error("Failed to set block data", zap.String("from", tx.From.String()), zap.Uint64("nonce", tx.Nonce))
-			return err
-		}
+		// if err := setTxList(DBTransaction, tx); err != nil {
+		// 	logger.Error("Failed to set block data", zap.String("from", tx.From.String()), zap.Uint64("nonce", tx.Nonce))
+		// 	return err
+		// }
 	}
+
+	/* 	//固定周期处理投票结果
+	   	if height%(30*24*60*60) == 0 {
+	   		//处理投票结果
+	   		Voteresult(DBTransaction)
+		   } */
+
+	if err := setPckAndDktoToatal(DBTransaction, pckTotal, dKtoTotal); err != nil {
+		logger.Error("failed to set total", zap.Error(err))
+		return err
+	}
+
 	logger.Info("end to commit block")
 	return DBTransaction.Commit()
 }
@@ -354,12 +450,15 @@ func (bc *Blockchain) GetBlockByHash(hash []byte) (*block.Block, error) { //
 
 // GetBlockByHeight 获取块高对应的块
 func (bc *Blockchain) GetBlockByHeight(height uint64) (*block.Block, error) {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.getBlockByheight(height)
+}
+
+func (bc *Blockchain) getBlockByheight(height uint64) (*block.Block, error) {
 	if height < 1 {
 		return nil, errors.New("parameter error")
 	}
-
-	bc.mu.RLock()
-	defer bc.mu.RUnlock()
 
 	// 1、先获取到hash
 	hash, err := bc.db.Get(append(HeightPrefix, miscellaneous.E64func(height)...))
@@ -376,6 +475,27 @@ func (bc *Blockchain) GetBlockByHeight(height uint64) (*block.Block, error) {
 	return block.Deserialize(blockData)
 }
 
+func (bc *Blockchain) GBbyHeight(height uint64) (*block.Block, error) {
+	if height < 1 {
+		return nil, errors.New("parameter error")
+	}
+
+	// 1、先获取到hash
+	hash, err := bc.db.Get(append(HeightPrefix, miscellaneous.E64func(height)...))
+	if err != nil {
+		return nil, err
+	}
+
+	// 2、通过hash获取block
+	blockData, err := bc.db.Get(hash)
+	if err != nil {
+		return nil, err
+	}
+
+	return block.Deserialize(blockData)
+}
+
+/*
 // GetTransactions 获取从start到end的所有交易
 func (bc *Blockchain) GetTransactions(start, end int64) ([]*transaction.Transaction, error) {
 	//获取hash的交易
@@ -406,51 +526,133 @@ func (bc *Blockchain) GetTransactions(start, end int64) ([]*transaction.Transact
 
 	return transactions, err
 }
+*/
+// GetTransactions 获取从start到end的所有交易
+func (bc *Blockchain) GetTransactions(start, end int64) ([]*transaction.Transaction, error) {
+	//获取hash的交易
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	hashList, err := bc.db.Lrange(TxListName, start, end)
+	if err != nil {
+		logger.Error("failed to get txlist", zap.Error(err))
+		return nil, err
+	}
+
+	transactions := make([]*transaction.Transaction, 0, len(hashList))
+	for _, hash := range hashList {
+		txBytes, err := bc.getTransactionByHash(hash)
+		if err != nil {
+			return nil, err
+		}
+
+		// transaction := &transaction.Transaction{}
+		// if err := json.Unmarshal(txBytes, transaction); err != nil {
+		// 	logger.Error("Failed to unmarshal bytes", zap.Error(err))
+		// 	return nil, err
+		// }
+
+		transactions = append(transactions, txBytes)
+	}
+
+	return transactions, err
+}
 
 // GetTransactionByHash 获取交易哈希对应的交易
 func (bc *Blockchain) GetTransactionByHash(hash []byte) (*transaction.Transaction, error) {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
+	return bc.getTransactionByHash(hash)
+}
 
-	txBytes, err := bc.db.Get(hash)
+func (bc *Blockchain) getTransactionByHash(hash []byte) (*transaction.Transaction, error) {
+
+	Hi, err := bc.db.Get(hash)
 	if err != nil {
 		logger.Error("failed to get hash", zap.Error(err))
 		return nil, err
 	}
-
-	transaction := &transaction.Transaction{}
-	err = json.Unmarshal(txBytes, transaction)
+	var txindex TXindex
+	err = json.Unmarshal(Hi, &txindex)
 	if err != nil {
+		logger.Error("Failed to unmarshal bytes", zap.Error(err))
+		return nil, err
+	}
+	// bh, err := miscellaneous.D64func(Hi.Height)
+	// if err != nil {
+	// 	logger.Error("failed to get hash", zap.Error(err))
+	// 	return nil, err
+	// }
+	b, err := bc.getBlockByheight(txindex.Height)
+	if err != nil {
+		logger.Error("failed to getblock height", zap.Error(err), zap.Uint64("height", txindex.Height))
 		return nil, err
 	}
 
-	return transaction, nil
+	//transaction := &transaction.Transaction{}
+	tx := b.Transactions[txindex.Index]
+	// err = json.Unmarshal(tx, transaction)
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	return tx, nil
 }
+
+// // GetTransactionByAddr 获取address从start到end的所有交易
+// func (bc *Blockchain) GetTransactionByAddr(address []byte, start, end int64) ([]*transaction.Transaction, error) {
+// 	bc.mu.RLock()
+// 	defer bc.mu.RUnlock()
+
+// 	txHashList, err := bc.db.Lrange(append(AddrListPrefix, address...), start, end)
+// 	if err != nil {
+// 		logger.Error("failed to get addrhashlist", zap.Error(err))
+// 		return nil, err
+// 	}
+
+// 	transactions := make([]*transaction.Transaction, 0, len(txHashList))
+// 	for _, hash := range txHashList {
+// 		txBytes, err := bc.db.Get(hash)
+// 		if err != nil {
+// 			logger.Error("Failed to get transaction", zap.Error(err), zap.ByteString("hash", hash))
+// 			return nil, err
+// 		}
+// 		var tx transaction.Transaction
+// 		if err := json.Unmarshal(txBytes, &tx); err != nil {
+// 			logger.Error("Failed to unmarshal bytes", zap.Error(err))
+// 			return nil, err
+// 		}
+// 		transactions = append(transactions, &tx)
+// 	}
+
+// 	return transactions, nil
+// }
 
 // GetTransactionByAddr 获取address从start到end的所有交易
 func (bc *Blockchain) GetTransactionByAddr(address []byte, start, end int64) ([]*transaction.Transaction, error) {
 	bc.mu.RLock()
 	defer bc.mu.RUnlock()
-
-	txHashList, err := bc.db.Lrange(append(AddrListPrefix, address...), start, end)
+	//Mkeys([]byte) ([][]byte, error)
+	txHashList, err := bc.db.Mkeys(address)
 	if err != nil {
 		logger.Error("failed to get addrhashlist", zap.Error(err))
 		return nil, err
 	}
 
 	transactions := make([]*transaction.Transaction, 0, len(txHashList))
-	for _, hash := range txHashList {
-		txBytes, err := bc.db.Get(hash)
+	ltx := len(txHashList)
+	if uint64(end) > uint64(ltx) {
+		end = int64(ltx)
+	}
+
+	for i := start; i < end; i++ {
+		txBytes, err := bc.getTransactionByHash(txHashList[i])
 		if err != nil {
-			logger.Error("Failed to get transaction", zap.Error(err), zap.ByteString("hash", hash))
+			logger.Error("Failed to get transaction", zap.Error(err), zap.ByteString("hash", txHashList[i]))
 			return nil, err
 		}
-		var tx transaction.Transaction
-		if err := json.Unmarshal(txBytes, &tx); err != nil {
-			logger.Error("Failed to unmarshal bytes", zap.Error(err))
-			return nil, err
-		}
-		transactions = append(transactions, &tx)
+
+		transactions = append(transactions, txBytes)
 	}
 
 	return transactions, nil
@@ -533,6 +735,7 @@ func Distr(txs []*transaction.Transaction, minaddr, Ds, Cm, QTJ types.Address, h
 	txs = append(txs, transaction.NewCoinBaseTransaction(minaddr, jsAmount))
 
 	sqAmount := each * 4 //40% 社区
+	//	SetIncome(Samount)
 	txs = append(txs, transaction.NewCoinBaseTransaction(Cm, sqAmount))
 
 	return txs
@@ -543,6 +746,23 @@ func setTxbyaddr(DBTransaction store.Transaction, addr []byte, tx transaction.Tr
 	// return DBTransaction.Mset(addr, tx.Hash, txBytes)
 	listNmae := append(AddrListPrefix, addr...)
 	_, err := DBTransaction.Llpush(listNmae, tx.Hash)
+	return err
+}
+
+func setTxbyaddrKV(DBTransaction store.Transaction, addr []byte, tx transaction.Transaction, index uint64) error {
+	// txBytes, _ := json.Marshal(tx)
+	// return DBTransaction.Mset(addr, tx.Hash, txBytes)
+	DBTransaction.Mset(addr, tx.Hash, []byte(""))
+	txindex := &TXindex{
+		Height: tx.BlockNumber,
+		Index:  index,
+	}
+	tdex, err := json.Marshal(txindex)
+	if err != nil {
+		logger.Error("Failed Marshal txindex", zap.Error(err))
+		return err
+	}
+	DBTransaction.Set(tx.Hash, tdex)
 	return err
 }
 
@@ -653,12 +873,20 @@ func (bc *Blockchain) CalculationResults(block *block.Block) ([]byte, error) {
 	var ok bool
 	var err error
 	var avlBalance, frozenBalance uint64
+	var pckDkto struct {
+		pck  uint64
+		dkto uint64
+	}
 	//block.Results = make(map[string]uint64)
 	avlBalanceResults := make(map[string]uint64)
 	frozenBalanceResults := make(map[string]uint64)
+	pckDktoResults := make(map[string]struct {
+		pck  uint64
+		dkto uint64
+	})
 	for _, tx := range block.Transactions {
 		//1、from余额计算
-		if tx.IsTransferTrasnaction() {
+		if tx.IsTransferTrasnaction() || tx.IsConvertKtoTransaction() || tx.IsConvertPckTransaction() {
 			if avlBalance, ok = avlBalanceResults[tx.From.String()]; !ok {
 				balance, err := bc.GetBalance(tx.From.Bytes())
 				if err != nil {
@@ -678,67 +906,109 @@ func (bc *Blockchain) CalculationResults(block *block.Block) ([]byte, error) {
 				avlBalance = balance - frozenBalance
 			}
 
-			if util.Uint64SubOverflow(avlBalance, tx.Amount, tx.Fee) {
-				logger.Info("sub overflow", zap.Uint64("avaliable balance", avlBalance), zap.Uint64("amount", tx.Amount),
-					zap.Uint64("fee", tx.Fee))
-				return nil, errors.New("insufficient balance")
+			if tx.IsConvertKtoTransaction() || tx.IsConvertPckTransaction() {
+				if pckDkto, ok = pckDktoResults[tx.From.String()]; !ok {
+					pckDkto.dkto, err = bc.GetDKto(tx.From.Bytes())
+					if err != nil {
+						return nil, err
+					}
+
+					pckDkto.pck, err = bc.GetPck(tx.From.Bytes())
+					if err != nil {
+						return nil, err
+					}
+				}
 			}
-			avlBalanceResults[tx.From.String()] = avlBalance - tx.Amount - tx.Fee
+
+			if tx.IsTransferTrasnaction() {
+				if util.Uint64SubOverflow(avlBalance, tx.Amount, tx.Fee) {
+					logger.Info("sub overflow", zap.Uint64("avaliable balance", avlBalance), zap.Uint64("amount", tx.Amount),
+						zap.Uint64("fee", tx.Fee))
+					return nil, errors.New("insufficient balance")
+				}
+				avlBalanceResults[tx.From.String()] = avlBalance - tx.Amount - tx.Fee
+			} else if tx.IsConvertPckTransaction() {
+				if avlBalance < tx.KtoNum || util.Uint64AddOverflow(pckDkto.pck, tx.PckNum) ||
+					util.Uint64AddOverflow(pckDkto.dkto, tx.KtoNum) {
+					logger.Info("sub overflow", zap.Uint64("avaliable balance", avlBalance), zap.Uint64("ktonum", tx.KtoNum),
+						zap.Uint64("pck balance", pckDkto.pck), zap.Uint64("pck number", tx.PckNum), zap.Uint64("dkto balance", pckDkto.dkto))
+					return nil, errors.New("insufficient balance")
+				}
+				avlBalanceResults[tx.From.String()] = avlBalance - tx.KtoNum
+				pckDktoResults[tx.From.String()] = struct {
+					pck  uint64
+					dkto uint64
+				}{pckDkto.pck + tx.PckNum, pckDkto.dkto + tx.KtoNum}
+			} else if tx.IsConvertKtoTransaction() {
+				if pckDkto.pck < tx.PckNum || pckDkto.dkto < tx.KtoNum || util.Uint64AddOverflow(avlBalance, tx.KtoNum) {
+					logger.Info("add overflow", zap.Uint64("avaliable balance", avlBalance), zap.Uint64("ktonum", tx.KtoNum),
+						zap.Uint64("pck balance", pckDkto.pck), zap.Uint64("pck number", tx.PckNum), zap.Uint64("dkto balance", pckDkto.dkto))
+					return nil, errors.New("insufficient balance")
+				}
+				avlBalanceResults[tx.From.String()] = avlBalance + tx.KtoNum
+				pckDktoResults[tx.From.String()] = struct {
+					pck  uint64
+					dkto uint64
+				}{pckDkto.pck - tx.PckNum, pckDkto.dkto - tx.KtoNum}
+			}
 		}
 
 		//2、to余额计算
-		if avlBalance, ok = avlBalanceResults[tx.To.String()]; !ok {
-			balance, err := bc.GetBalance(tx.To.Bytes())
-			if err != nil {
-				return nil, err
-			}
+		if !tx.IsConvertKtoTransaction() && !tx.IsConvertPckTransaction() {
+			if avlBalance, ok = avlBalanceResults[tx.To.String()]; !ok {
+				balance, err := bc.GetBalance(tx.To.Bytes())
+				if err != nil {
+					return nil, err
+				}
 
-			frozenBalance, err := bc.GetFreezeBalance(tx.To.Bytes())
-			if err != nil {
-				return nil, err
-			}
+				frozenBalance, err := bc.GetFreezeBalance(tx.To.Bytes())
+				if err != nil {
+					return nil, err
+				}
 
-			if util.Uint64SubOverflow(balance, frozenBalance) {
-				logger.Info("sub overflow", zap.String("address", tx.To.String()),
+				if util.Uint64SubOverflow(balance, frozenBalance) {
+					logger.Info("sub overflow", zap.String("address", tx.To.String()),
+						zap.Uint64("balance", balance), zap.Uint64("frozen balance", frozenBalance))
+					return nil, errors.New("insufficient balance")
+				}
+				logger.Info("Balance information", zap.String("address", tx.To.String()),
 					zap.Uint64("balance", balance), zap.Uint64("frozen balance", frozenBalance))
-				return nil, errors.New("insufficient balance")
+				avlBalance = balance - frozenBalance
 			}
-			logger.Info("Balance information", zap.String("address", tx.To.String()),
-				zap.Uint64("balance", balance), zap.Uint64("frozen balance", frozenBalance))
-			avlBalance = balance - frozenBalance
+
+			if frozenBalance, ok = frozenBalanceResults[tx.To.String()]; !ok {
+				frozenBalance, err = bc.getFreezeBalance(tx.To.Bytes())
+				if err != nil {
+					return nil, err
+				}
+			}
+
+			if tx.IsCoinBaseTransaction() || tx.IsTransferTrasnaction() {
+				avlBalanceResults[tx.To.String()] = avlBalance + tx.Amount
+			} else if tx.IsFreezeTransaction() {
+				//TODO:处理冻结金额大于余额的情况
+				if avlBalance < tx.Amount {
+					logger.Info("sub overflow", zap.Uint64("avaliable balance", avlBalance), zap.Uint64("amount", tx.Amount))
+					return nil, errors.New("insufficient balance")
+				}
+				avlBalanceResults[tx.To.String()] = avlBalance - tx.Amount
+				frozenBalanceResults[tx.To.String()] = frozenBalance + tx.Amount
+			} else if tx.IsUnfreezeTransaction() {
+				if frozenBalance < tx.Amount {
+					logger.Info("sub overflow", zap.Uint64("frozen balance", frozenBalance), zap.Uint64("amount", tx.Amount))
+					return nil, errors.New("insufficient frozen balance")
+				}
+				frozenBalanceResults[tx.To.String()] = frozenBalance - tx.Amount
+				avlBalanceResults[tx.To.String()] = avlBalance + tx.Amount
+			} else {
+				return nil, errors.New("wrong transaction type")
+			}
 		}
 
-		if frozenBalance, ok = frozenBalanceResults[tx.To.String()]; !ok {
-			frozenBalance, err = bc.getFreezeBalance(tx.To.Bytes())
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		if tx.IsCoinBaseTransaction() || tx.IsTransferTrasnaction() {
-			avlBalanceResults[tx.To.String()] = avlBalance + tx.Amount
-		} else if tx.IsFreezeTransaction() {
-			//TODO:处理冻结金额大于余额的情况
-			if avlBalance < tx.Amount {
-				logger.Info("sub overflow", zap.Uint64("avaliable balance", avlBalance), zap.Uint64("amount", tx.Amount))
-				return nil, errors.New("insufficient balance")
-			}
-			avlBalanceResults[tx.To.String()] = avlBalance - tx.Amount
-			frozenBalanceResults[tx.To.String()] = frozenBalance + tx.Amount
-		} else if tx.IsUnfreezeTransaction() {
-			if frozenBalance < tx.Amount {
-				logger.Info("sub overflow", zap.Uint64("frozen balance", frozenBalance), zap.Uint64("amount", tx.Amount))
-				return nil, errors.New("insufficient frozen balance")
-			}
-			frozenBalanceResults[tx.To.String()] = frozenBalance - tx.Amount
-			avlBalanceResults[tx.To.String()] = avlBalance + tx.Amount
-		} else {
-			return nil, errors.New("wrong transaction type")
-		}
 	}
 
 	var buf bytes.Buffer
-	var avlKeys, frzKeys []string
+	var avlKeys, frzKeys, pckDktoKeys []string
 
 	for key := range avlBalanceResults {
 		avlKeys = append(avlKeys, key)
@@ -749,6 +1019,11 @@ func (bc *Blockchain) CalculationResults(block *block.Block) ([]byte, error) {
 		frzKeys = append(frzKeys, key)
 	}
 	sort.Strings(frzKeys)
+
+	for key := range pckDktoResults {
+		pckDktoKeys = append(pckDktoKeys, key)
+	}
+	sort.Strings(pckDktoKeys)
 
 	for _, key := range avlKeys {
 		value := avlBalanceResults[key]
@@ -766,8 +1041,17 @@ func (bc *Blockchain) CalculationResults(block *block.Block) ([]byte, error) {
 		buf.Write(valBytes)
 	}
 
-	//TODO：把block中的results删除，换成hash
+	for _, key := range pckDktoKeys {
+		value := pckDktoResults[key]
+		addr, _ := types.StringToAddress(key)
+		pckBytes := miscellaneous.E64func(value.pck)
+		dktoBytes := miscellaneous.E64func(value.dkto)
+		buf.Write(addr.Bytes())
+		buf.Write(pckBytes)
+		buf.Write(dktoBytes)
+	}
 
+	//TODO：把block中的results删除，换成hash
 	hash := sha256.Sum256(buf.Bytes())
 
 	return hash[:], nil
@@ -866,4 +1150,648 @@ func (bc *Blockchain) GetTokenRoot(address, script string) ([]byte, error) {
 	}
 
 	return e.Root(), nil
+}
+
+//DeleteBlock delete block
+func (bc *Blockchain) DeleteBlock(height uint64) error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	DBTransaction := bc.db.NewTransaction()
+	defer DBTransaction.Cancel()
+
+	dbHeight, err := bc.getHeight()
+	if err != nil {
+		logger.Error("failed to get height", zap.Error(err))
+		return err
+	}
+
+	if height > dbHeight {
+		return fmt.Errorf("Wrong height to delete,[%v] should <= current height[%v]", height, dbHeight)
+	}
+
+	for dH := dbHeight; dH >= height; dH-- {
+		logger.Info("Start to delete block", zap.Uint64("height", dH))
+		block, err := bc.getBlockByheight(dH)
+		if err != nil {
+			logger.Error("failed to get block", zap.Error(err))
+			return err
+		}
+
+		for i, tx := range block.Transactions {
+			if tx.IsCoinBaseTransaction() {
+				if err = deleteTxbyaddrKV(DBTransaction, tx.To.Bytes(), *tx, uint64(i)); err != nil {
+					logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
+						zap.Uint64("amount", tx.Amount))
+					return err
+				}
+
+				if err := delToAccount(DBTransaction, tx); err != nil {
+					logger.Error("Failed to set account", zap.Error(err), zap.String("from address", tx.From.String()),
+						zap.Uint64("amount", tx.Amount))
+					return err
+				}
+			} else if !tx.IsTransferTrasnaction() {
+				if err := deleteTxbyaddrKV(DBTransaction, tx.From.Bytes(), *tx, uint64(i)); err != nil {
+					logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
+						zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+					return err
+				}
+
+				if err := deleteTxbyaddrKV(DBTransaction, tx.To.Bytes(), *tx, uint64(i)); err != nil {
+					logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
+						zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+					return err
+				}
+
+				nonce := tx.Nonce
+				if err := setNonce(DBTransaction, tx.From.Bytes(), miscellaneous.E64func(nonce)); err != nil {
+					logger.Error("Failed to set nonce", zap.Error(err), zap.String("from address", tx.From.String()),
+						zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+				}
+
+				var frozenBalBytes []byte
+				frozenBal, _ := bc.getFreezeBalance(tx.To.Bytes())
+				if tx.IsFreezeTransaction() {
+					frozenBalBytes = miscellaneous.E64func(tx.Amount - frozenBal)
+				} else {
+					frozenBalBytes = miscellaneous.E64func(frozenBal + tx.Amount)
+				}
+				if err := setFreezeBalance(DBTransaction, tx.To.Bytes(), frozenBalBytes); err != nil {
+					logger.Error("Faile to freeze balance", zap.String("address", tx.To.String()),
+						zap.Uint64("amount", tx.Amount))
+					return err
+				}
+			} else {
+				if tx.IsTokenTransaction() {
+					spilt := strings.Split(tx.Script, "\"")
+					if spilt[0] == "transfer " {
+						script := fmt.Sprintf("transfer \"%s\" %s \"%s\"", spilt[1], spilt[2], tx.From.String())
+
+						sc := parser.Parser([]byte(script))
+						e, err := exec.New(bc.cdb, sc, tx.To.String())
+						if err != nil {
+							logger.Error("Failed to new exec", zap.String("script", script),
+								zap.String("from address", tx.To.String()))
+							return err
+
+						}
+
+						if err = e.Flush(); err != nil {
+							logger.Error("Failed to flush exec", zap.String("script", script),
+								zap.String("from address", tx.To.String()))
+							return err
+						}
+					}
+					if err = delMinerFee(DBTransaction, block.Miner.Bytes(), tx.Fee); err != nil {
+						logger.Error("Failed to set fee", zap.Error(err), zap.String("script", tx.Script),
+							zap.String("from address", tx.From.String()), zap.Uint64("fee", tx.Fee))
+						return err
+					}
+				}
+
+				if err := deleteTxbyaddrKV(DBTransaction, tx.From.Bytes(), *tx, uint64(i)); err != nil {
+					logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
+						zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+					return err
+				}
+
+				if err := deleteTxbyaddrKV(DBTransaction, tx.To.Bytes(), *tx, uint64(i)); err != nil {
+					logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
+						zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+					return err
+				}
+
+				//更新nonce,block中txs必须是有序的
+				nonce := tx.Nonce
+				if err := setNonce(DBTransaction, tx.From.Bytes(), miscellaneous.E64func(nonce)); err != nil {
+					logger.Error("Failed to set nonce", zap.Error(err), zap.String("from address", tx.From.String()),
+						zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+					return err
+				}
+
+				//更新余额
+				if err := setAccount(DBTransaction, tx); err != nil {
+					logger.Error("Failed to set balance", zap.Error(err), zap.String("from address", tx.From.String()),
+						zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+					return err
+				}
+			}
+
+			// if err := setTxList(DBTransaction, tx); err != nil {
+			// 	logger.Error("Failed to set block data", zap.String("from", tx.From.String()), zap.Uint64("nonce", tx.Nonce))
+			// 	return err
+			// }
+		}
+
+		//高度->哈希
+		hash := block.Hash
+		if err = DBTransaction.Del(append(HeightPrefix, miscellaneous.E64func(block.Height)...)); err != nil {
+			logger.Error("Failed to Del height and hash", zap.Error(err))
+			return err
+		}
+
+		//哈希-> 块
+		if err = DBTransaction.Del(hash); err != nil {
+			logger.Error("Failed to Del block", zap.Error(err))
+			return err
+		}
+		// last
+		DBTransaction.Set(HeightKey, miscellaneous.E64func(dH-1))
+	}
+
+	logger.Info("End delete")
+	return DBTransaction.Commit()
+}
+
+func deleteTxbyaddrKV(DBTransaction store.Transaction, addr []byte, tx transaction.Transaction, index uint64) error {
+	// txBytes, _ := json.Marshal(tx)
+	// return DBTransaction.Mset(addr, tx.Hash, txBytes)
+	DBTransaction.Mdel(addr, tx.Hash)
+	// txindex := &TXindex{
+	// 	Height: tx.BlockNumber,
+	// 	Index:  index,
+	// }
+	// tdex, err := json.Marshal(txindex)
+	// if err != nil {
+	// 	logger.Error("Failed Marshal txindex", zap.Error(err))
+	// 	return err
+	// }
+	err := DBTransaction.Del(tx.Hash)
+	if err != nil {
+		logger.Error("Failed Marshal txindex", zap.Error(err))
+		return err
+	}
+	return err
+}
+
+func delToAccount(dbTransaction store.Transaction, transaction *transaction.Transaction) error {
+	var balance uint64
+	balanceBytes, err := dbTransaction.Get(transaction.To.Bytes())
+	if err != nil {
+		balance = 0
+	} else {
+		balance, err = miscellaneous.D64func(balanceBytes)
+		if err != nil {
+			return err
+		}
+	}
+
+	newBalanceBytes := miscellaneous.E64func(balance - transaction.Amount)
+	if err := setBalance(dbTransaction, transaction.To.Bytes(), newBalanceBytes); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func delAccount(DBTransaction store.Transaction, tx *transaction.Transaction) error {
+	from, to := tx.From.Bytes(), tx.To.Bytes()
+
+	fromBalBytes, _ := DBTransaction.Get(from)
+	fromBalance, _ := miscellaneous.D64func(fromBalBytes)
+	if tx.IsTokenTransaction() {
+		fromBalance = fromBalance + tx.Amount + tx.Fee
+	} else {
+		fromBalance += tx.Amount
+	}
+
+	tobalance, err := DBTransaction.Get(to)
+	if err != nil {
+		setBalance(DBTransaction, to, miscellaneous.E64func(0))
+		tobalance = miscellaneous.E64func(0)
+	}
+
+	toBalance, _ := miscellaneous.D64func(tobalance)
+	toBalance -= tx.Amount
+
+	Frombytes := miscellaneous.E64func(fromBalance)
+	Tobytes := miscellaneous.E64func(toBalance)
+
+	if err := setBalance(DBTransaction, from, Frombytes); err != nil {
+		return err
+	}
+	if err := setBalance(DBTransaction, to, Tobytes); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func delMinerFee(tx store.Transaction, to []byte, amount uint64) error {
+	tobalance, err := tx.Get(to)
+	if err == store.NotExist {
+		tobalance = miscellaneous.E64func(0)
+	} else if err != nil {
+		return err
+	}
+
+	toBalance, _ := miscellaneous.D64func(tobalance)
+	toBalanceBytes := miscellaneous.E64func(toBalance - amount)
+
+	return setBalance(tx, to, toBalanceBytes)
+}
+
+//RecoverBlock 向数据库添加新的block数据，minaddr矿工地址
+func (bc *Blockchain) RecoverBlock(block *block.Block, minaddr []byte) error {
+	logger.Info("Start to recover block...", zap.Uint64("height", block.Height))
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	DBTransaction := bc.db.NewTransaction()
+	defer DBTransaction.Cancel()
+	var err error
+	var height, prevHeight uint64
+	//拿出块高
+	prevHeight, err = bc.getHeight()
+	if err != nil {
+		logger.Error("failed to get height", zap.Error(err))
+		return err
+	}
+
+	height = prevHeight + 1
+	if block.Height != height {
+		return fmt.Errorf("height error:previous height=%d,current height=%d", prevHeight, height)
+	}
+
+	//高度->哈希
+	hash := block.Hash
+	if err = DBTransaction.Set(append(HeightPrefix, miscellaneous.E64func(height)...), hash); err != nil {
+		logger.Error("Failed to set height and hash", zap.Error(err))
+		return err
+	}
+
+	//哈希-> 块
+	if err = DBTransaction.Set(hash, block.Serialize()); err != nil {
+		logger.Error("Failed to set block", zap.Error(err))
+		return err
+	}
+
+	//重置块高
+	DBTransaction.Del(HeightKey)
+	DBTransaction.Set(HeightKey, miscellaneous.E64func(height))
+
+	for index, tx := range block.Transactions {
+		if tx.IsCoinBaseTransaction() {
+			if err = setTxbyaddrKV(DBTransaction, tx.To.Bytes(), *tx, uint64(index)); err != nil {
+				logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
+					zap.Uint64("amount", tx.Amount))
+				return err
+			}
+
+			if err := setToAccount(DBTransaction, tx); err != nil {
+				logger.Error("Failed to set account", zap.Error(err), zap.String("from address", tx.From.String()),
+					zap.Uint64("amount", tx.Amount))
+				return err
+			}
+		} else if !tx.IsTransferTrasnaction() {
+			if err := setTxbyaddrKV(DBTransaction, tx.From.Bytes(), *tx, uint64(index)); err != nil {
+				logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
+					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+				return err
+			}
+
+			if err := setTxbyaddrKV(DBTransaction, tx.To.Bytes(), *tx, uint64(index)); err != nil {
+				logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
+					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+				return err
+			}
+
+			nonce := tx.Nonce + 1
+			if err := setNonce(DBTransaction, tx.From.Bytes(), miscellaneous.E64func(nonce)); err != nil {
+				logger.Error("Failed to set nonce", zap.Error(err), zap.String("from address", tx.From.String()),
+					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+			}
+
+			var frozenBalBytes []byte
+			frozenBal, _ := bc.getFreezeBalance(tx.To.Bytes())
+			if tx.IsFreezeTransaction() {
+				frozenBalBytes = miscellaneous.E64func(tx.Amount + frozenBal)
+			} else {
+				frozenBalBytes = miscellaneous.E64func(frozenBal - tx.Amount)
+			}
+			if err := setFreezeBalance(DBTransaction, tx.To.Bytes(), frozenBalBytes); err != nil {
+				logger.Error("Faile to freeze balance", zap.String("address", tx.To.String()),
+					zap.Uint64("amount", tx.Amount))
+				return err
+			}
+		} else {
+			if tx.IsTokenTransaction() {
+				spilt := strings.Split(tx.Script, "\"")
+				if spilt[0] == "transfer " {
+					sc := parser.Parser([]byte(tx.Script))
+					e, err := exec.New(bc.cdb, sc, tx.From.String())
+					if err != nil {
+						logger.Error("Failed to new exec", zap.String("script", tx.Script),
+							zap.String("from address", tx.From.String()))
+						return err
+					}
+
+					if err = e.Flush(); err != nil {
+						logger.Error("Failed to flush exec", zap.String("script", tx.Script),
+							zap.String("from address", tx.From.String()))
+						return err
+					}
+
+				}
+
+				if err = setMinerFee(DBTransaction, minaddr, tx.Fee); err != nil {
+					logger.Error("Failed to set fee", zap.Error(err), zap.String("script", tx.Script),
+						zap.String("from address", tx.From.String()), zap.Uint64("fee", tx.Fee))
+					return err
+				}
+			}
+
+			if err := setTxbyaddrKV(DBTransaction, tx.From.Bytes(), *tx, uint64(index)); err != nil {
+				logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
+					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+				return err
+			}
+
+			if err := setTxbyaddrKV(DBTransaction, tx.To.Bytes(), *tx, uint64(index)); err != nil {
+				logger.Error("Failed to set transaction", zap.Error(err), zap.String("from address", tx.From.String()),
+					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+				return err
+			}
+
+			//更新nonce,block中txs必须是有序的
+			nonce := tx.Nonce + 1
+			if err := setNonce(DBTransaction, tx.From.Bytes(), miscellaneous.E64func(nonce)); err != nil {
+				logger.Error("Failed to set nonce", zap.Error(err), zap.String("from address", tx.From.String()),
+					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+				return err
+			}
+
+			//更新余额
+			if err := setAccount(DBTransaction, tx); err != nil {
+				logger.Error("Failed to set balance", zap.Error(err), zap.String("from address", tx.From.String()),
+					zap.String("to address", tx.To.String()), zap.Uint64("amount", tx.Amount))
+				return err
+			}
+		}
+
+		if err := setTxList(DBTransaction, tx); err != nil {
+			logger.Error("Failed to set block data", zap.String("from", tx.From.String()), zap.Uint64("nonce", tx.Nonce))
+			return err
+		}
+	}
+	logger.Info("End recover.")
+	return DBTransaction.Commit()
+}
+
+func setConvertPck(tx store.Transaction, from []byte, ktoNum, pckNum uint64) error {
+	var bal, pckBal, dKto uint64
+	// pck
+	pckKey := append([]byte(pckPrefix), from...)
+	pckBalBytes, err := tx.Get(pckKey)
+	if err != nil && err != store.NotExist {
+		return err
+	}
+
+	if err == store.NotExist {
+		pckBal = 0
+	} else {
+		pckBal, _ = miscellaneous.D64func(pckBalBytes)
+	}
+
+	if MAXUINT64-pckBal < pckNum {
+		return errors.New("integer overflow")
+	}
+
+	if err := tx.Set(pckKey, miscellaneous.E64func(pckBal+pckNum)); err != nil {
+		return err
+	}
+
+	// dKto
+	dKtoKey := append([]byte(dKtoPrefix), from...)
+	dKtoBytes, err := tx.Get(dKtoKey)
+	if err != nil && err != store.NotExist {
+		return err
+	}
+
+	if err == store.NotExist {
+		dKto = 0
+	} else {
+		dKto, _ = miscellaneous.D64func(dKtoBytes)
+	}
+
+	if MAXUINT64-dKto < ktoNum {
+		return errors.New("integer overflow")
+	}
+
+	if err := tx.Set(dKtoKey, miscellaneous.E64func(dKto+ktoNum)); err != nil {
+		return err
+	}
+
+	// 余额
+	balBytes, err := tx.Get(from)
+	if err != nil && err != store.NotExist {
+		return err
+	}
+
+	if err == store.NotExist {
+		bal = 0
+	} else {
+		bal, _ = miscellaneous.D64func(balBytes)
+	}
+
+	if bal < ktoNum {
+		fmt.Println(bal)
+		return errors.New("integer overflow")
+	}
+
+	if err := tx.Set(from, miscellaneous.E64func(bal-ktoNum)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func setConvertKto(tx store.Transaction, from []byte, ktoNum, pckNum uint64) error {
+	var bal, pckBal, dKto uint64
+	// pck
+	pckKey := append([]byte(pckPrefix), from...)
+	pckBalBytes, err := tx.Get(pckKey)
+	if err != nil && err != store.NotExist {
+		return err
+	}
+
+	if err == store.NotExist {
+		pckBal = 0
+	} else {
+		pckBal, _ = miscellaneous.D64func(pckBalBytes)
+	}
+
+	if pckBal < pckNum {
+		return errors.New("integer overflow")
+	}
+
+	if err := tx.Set(pckKey, miscellaneous.E64func(pckBal-pckNum)); err != nil {
+		return err
+	}
+
+	// dKto
+	dKtoKey := append([]byte(dKtoPrefix), from...)
+	dKtoBytes, err := tx.Get(dKtoKey)
+	if err != nil && err != store.NotExist {
+		return err
+	}
+
+	if err == store.NotExist {
+		dKto = 0
+	} else {
+		dKto, _ = miscellaneous.D64func(dKtoBytes)
+	}
+
+	if dKto < ktoNum {
+		return errors.New("integer overflow")
+	}
+
+	if err := tx.Set(dKtoKey, miscellaneous.E64func(dKto-ktoNum)); err != nil {
+		return err
+	}
+
+	// 余额
+	balBytes, err := tx.Get(from)
+	if err != nil && err != store.NotExist {
+		return err
+	}
+
+	if err == store.NotExist {
+		bal = 0
+	} else {
+		bal, _ = miscellaneous.D64func(balBytes)
+	}
+
+	if MAXUINT64-bal < ktoNum {
+		return errors.New("integer overflow")
+	}
+
+	if err := tx.Set(from, miscellaneous.E64func(bal+ktoNum)); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func getPckTotal(tx store.Transaction) (uint64, error) {
+	data, err := tx.Get([]byte(PckTotalName))
+	if err != nil && err != store.NotExist {
+		return 0, err
+	}
+
+	if err == store.NotExist {
+		return 0, nil
+	}
+
+	return miscellaneous.D64func(data)
+}
+
+func getDKtoTotal(tx store.Transaction) (uint64, error) {
+	data, err := tx.Get([]byte(DKtoTotalName))
+	if err != nil && err != store.NotExist {
+		return 0, err
+	}
+
+	if err == store.NotExist {
+		return 0, nil
+	}
+
+	return miscellaneous.D64func(data)
+}
+
+func (Bc *Blockchain) GetPckTotal() (uint64, error) {
+	tx := Bc.db.NewTransaction()
+	defer tx.Cancel()
+
+	total, err := getPckTotal(tx)
+	if err != nil {
+		return 0, err
+	}
+	return total, tx.Commit()
+}
+
+func (Bc *Blockchain) GetDKtoTotal() (uint64, error) {
+	tx := Bc.db.NewTransaction()
+	defer tx.Cancel()
+	total, err := getDKtoTotal(tx)
+	if err != nil {
+		return 0, err
+	}
+	return total, tx.Commit()
+}
+
+func setPckAndDktoToatal(tx store.Transaction, pckTotal, dKtoTotal uint64) error {
+	if err := tx.Set([]byte(PckTotalName), miscellaneous.E64func(pckTotal)); err != nil {
+		return err
+	}
+	if err := tx.Set([]byte(DKtoTotalName), miscellaneous.E64func(dKtoTotal)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func getPck(tx store.Transaction, addr []byte) (uint64, error) {
+	var num uint64
+	key := append([]byte(pckPrefix), addr...)
+	data, err := tx.Get(key)
+	if err != nil && err != store.NotExist {
+		return 0, err
+	}
+	if err == store.NotExist {
+		num = 0
+	} else {
+		num, _ = miscellaneous.D64func(data)
+	}
+	return num, nil
+}
+
+func getDKto(tx store.Transaction, addr []byte) (uint64, error) {
+	var num uint64
+	key := append([]byte(dKtoPrefix), addr...)
+
+	data, err := tx.Get(key)
+	if err != nil && err != store.NotExist {
+		return 0, err
+	}
+	if err == store.NotExist {
+		num = 0
+	} else {
+		num, _ = miscellaneous.D64func(data)
+	}
+	return num, nil
+}
+
+func (Bc *Blockchain) GetPck(addr []byte) (uint64, error) {
+	tx := Bc.db.NewTransaction()
+	defer tx.Cancel()
+	num, err := getPck(tx, addr)
+	if err != nil {
+		return 0, err
+	}
+	return num, tx.Commit()
+}
+
+func (Bc *Blockchain) GetDKto(addr []byte) (uint64, error) {
+	tx := Bc.db.NewTransaction()
+	defer tx.Cancel()
+
+	num, err := getDKto(tx, addr)
+	if err != nil {
+		return 0, err
+	}
+
+	return num, tx.Commit()
+}
+
+func (Bc *Blockchain) GetTokenDemic(symbol []byte) (uint64, error) {
+
+	Bc.mu.RLock()
+	defer Bc.mu.RUnlock()
+
+	b, err := exec.Precision(Bc.cdb, string(symbol)) // 2，代比， 3，地址
+	if err != nil {
+		return 0, err
+	}
+	return b, nil
 }

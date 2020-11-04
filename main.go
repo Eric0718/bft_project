@@ -9,6 +9,7 @@ import (
 	"kortho/blockchain"
 	"kortho/config"
 	"kortho/logger"
+	"kortho/monitor"
 	"kortho/p2p/node"
 	"kortho/transaction"
 	"kortho/txpool"
@@ -68,9 +69,14 @@ func main() {
 		}
 	}
 
+	if cfg.MonitorCfg != nil {
+		monitor.Run(cfg.MonitorCfg, bc)
+	}
+
 	if cfg.APIConfig == nil {
 		logger.Error("load APIConfig failed!")
 		os.Exit(-1)
 	}
 	api.Start(cfg.APIConfig, bc, tp, nT)
+
 }

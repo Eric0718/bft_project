@@ -7,7 +7,7 @@ import (
 
 func TestScript(t *testing.T) {
 	{
-		xs := Parser([]byte("new \"abc\" 1000000000"))
+		xs := Parser([]byte("new \"abc\" 1000000000 8"))
 		for _, s := range xs {
 			fmt.Printf("%s\n", s.name)
 			for i, v := range s.args {

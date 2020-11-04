@@ -19,6 +19,7 @@ type Consensus interface {
 	//get leader address
 	GetLeader() string
 	LeaderShipTransferToF() error
+	GetStats() map[string]string
 }
 
 type Config struct {
@@ -74,4 +75,8 @@ func (a *node) LeaderShipTransferToF() error {
 		return err.Error()
 	}
 	return nil
+}
+
+func (a *node) GetStats() map[string]string {
+	return a.Stats()
 }

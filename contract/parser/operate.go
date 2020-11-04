@@ -40,7 +40,7 @@ func Parser(data []byte) []*Script {
 	return xs
 }
 
-// new tokenId total_amount
+// new tokenId total_amount precision
 func operate0(np *scriptNode) *Script {
 	var args []*ScriptArgument
 
@@ -48,6 +48,12 @@ func operate0(np *scriptNode) *Script {
 		return nil
 	}
 	if err := takeArgument(TOKENID, np, &args); err != nil {
+		return nil
+	}
+	if np = nextArgument(np); np == nil {
+		return nil
+	}
+	if err := takeArgument(AMOUNT, np, &args); err != nil {
 		return nil
 	}
 	if np = nextArgument(np); np == nil {

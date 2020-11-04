@@ -121,11 +121,20 @@ func (pool *TxPool) Pending(Bc blockchain.Blockchains) (readyTxs []*transaction.
 	nonceMap := make(map[string]uint64)
 	frozenBalMap := make(map[string]uint64)
 	avaliableBalMap := make(map[string]uint64)
+	pckDktoResults := make(map[string]struct {
+		pck  uint64
+		dkto uint64
+	})
 
 	for pool.List.Len() != 0 && len(readyTxs) < ReadyTotal {
 		var ok bool
 		var address types.Address
-		var avaliableBal, frozenBal, nonce uint64
+		var avaliableBal, frozenBal uint64
+		var nonce uint64
+		var pckdkto struct {
+			pck  uint64
+			dkto uint64
+		}
 		tx := heap.Pop(pool.List).(*transaction.Transaction)
 
 		if tx.IsFreezeTransaction() || tx.IsUnfreezeTransaction() {
@@ -163,6 +172,20 @@ func (pool *TxPool) Pending(Bc blockchain.Blockchains) (readyTxs []*transaction.
 			}
 		}
 
+		if pckdkto, ok = pckDktoResults[address.String()]; !ok {
+			pckdkto.pck, err = Bc.GetPck(address.Bytes())
+			if err != nil {
+				logger.Error("failed to get pck balance", zap.Error(err), zap.String("address", address.String()))
+				return
+			}
+
+			pckdkto.dkto, err = Bc.GetDKto(address.Bytes())
+			if err != nil {
+				logger.Error("failed to get pck balance", zap.Error(err), zap.String("address", address.String()))
+				return
+			}
+		}
+
 		if nonce, ok = nonceMap[tx.From.String()]; !ok {
 			nonce, err = Bc.GetNonce(tx.From.Bytes())
 			if err != nil {
@@ -170,7 +193,7 @@ func (pool *TxPool) Pending(Bc blockchain.Blockchains) (readyTxs []*transaction.
 				return
 			}
 		}
-
+		logger.Debug("tag info", zap.Int32("tag", tx.Tag))
 		if tx.IsUnfreezeTransaction() {
 			//TODO:是解锁交易的处理情况
 			if nonce == tx.Nonce && !util.Uint64SubOverflow(frozenBal, tx.Amount) {
@@ -189,22 +212,53 @@ func (pool *TxPool) Pending(Bc blockchain.Blockchains) (readyTxs []*transaction.
 			logger.Error("nonce or amount error", zap.String("from", tx.From.String()), zap.Uint64("current nonce", nonce),
 				zap.Uint64("tx nonce", tx.Nonce), zap.Uint64("avaliable balance", avaliableBal), zap.Uint64("amount", tx.Amount))
 		} else {
-			if nonce == tx.Nonce && !util.Uint64SubOverflow(avaliableBal, tx.Amount, tx.Fee) {
-				//if balance >= tx.Amount+tx.Fee && nonce == tx.Nonce {
+			if nonce == tx.Nonce {
+				if (tx.IsTransferTrasnaction() || tx.IsFreezeTransaction()) && !util.Uint64SubOverflow(avaliableBal, tx.Amount, tx.Fee) {
+					logger.Debug("transfer or freeze", zap.String("from", tx.From.String()), zap.Uint64("avaliable balance", avaliableBal),
+						zap.Uint64("amount", tx.Amount), zap.Uint64("fee", tx.Fee))
+					avaliableBalMap[address.String()] = avaliableBal - tx.Amount - tx.Fee
+					if tx.IsFreezeTransaction() {
+						frozenBalMap[address.String()] = frozenBal + tx.Amount
+					}
+				} else if tx.IsConvertPckTransaction() && !util.Uint64SubOverflow(avaliableBal, tx.KtoNum) &&
+					!util.Uint64AddOverflow(pckdkto.pck, tx.PckNum) && !util.Uint64AddOverflow(pckdkto.dkto, tx.KtoNum) {
+					logger.Debug("tx info", zap.Bool("IsConvertPckTransaction", true), zap.Int32("tag", tx.Tag))
+					avaliableBalMap[address.String()] -= tx.KtoNum
+
+					pckDktoResults[address.String()] = struct {
+						pck  uint64
+						dkto uint64
+					}{
+						pckdkto.pck + tx.PckNum,
+						pckdkto.dkto + tx.KtoNum,
+					}
+				} else if tx.IsConvertKtoTransaction() && !util.Uint64SubOverflow(pckdkto.pck, tx.PckNum) &&
+					!util.Uint64AddOverflow(pckdkto.dkto, tx.KtoNum) && !util.Uint64AddOverflow(avaliableBal, tx.KtoNum) {
+					avaliableBalMap[address.String()] += tx.KtoNum
+
+					pckDktoResults[address.String()] = struct {
+						pck  uint64
+						dkto uint64
+					}{
+						pckdkto.pck - tx.PckNum,
+						pckdkto.dkto - tx.KtoNum,
+					}
+				} else {
+					logger.Error("nonce or amount error", zap.String("from", tx.From.String()), zap.Uint64("current nonce", nonce),
+						zap.Uint64("tx nonce", tx.Nonce), zap.Uint64("avaliable balance", avaliableBal), zap.Uint64("amount", tx.Amount))
+					continue
+				}
 				nonce++
 				nonceMap[tx.From.String()] = nonce
-				avaliableBalMap[address.String()] = avaliableBal - tx.Amount - tx.Fee
-				if tx.IsFreezeTransaction() {
-					frozenBalMap[address.String()] = frozenBal + tx.Amount
-				}
+
 				readyTxs = append(readyTxs, tx)
 				continue
-			} else if tx.Nonce > nonce && nonce+NonceLimits < tx.Nonce { //TODO:要避免无法上链的tx越积越多,可以设置nonce的差距
+			} else if tx.Nonce > nonce && tx.Nonce < nonce+NonceLimits { //TODO:要避免无法上链的tx越积越多,可以设置nonce的差距
 				noReadyTxs = append(noReadyTxs, tx)
 				continue
 			}
-			logger.Error("nonce or amount error", zap.String("from", tx.From.String()), zap.Uint64("current nonce", nonce),
-				zap.Uint64("tx nonce", tx.Nonce), zap.Uint64("avvaliable balance", avaliableBal), zap.Uint64("amount", tx.Amount))
+			// logger.Error("nonce or amount error", zap.String("from", tx.From.String()), zap.Uint64("current nonce", nonce),
+			// 	zap.Uint64("tx nonce", tx.Nonce), zap.Uint64("avaliable balance", avaliableBal), zap.Uint64("amount", tx.Amount))
 		}
 	}
 
@@ -217,168 +271,6 @@ func (pool *TxPool) Pending(Bc blockchain.Blockchains) (readyTxs []*transaction.
 }
 
 func verify(tx transaction.Transaction, bc blockchain.Blockchains) bool {
-	// if tx.IsCoinBaseTransaction() {
-	// 	//1、检查to
-	// 	if !tx.To.Verify() {
-	// 		logger.Info("failed to verify address", zap.String("to", tx.To.String()))
-	// 		return false
-	// 	}
-	// } else if tx.IsFreezeTransaction() {
-	// 	//1、检查from
-	// 	if !tx.From.Verify() {
-	// 		logger.Info("faile to verify address", zap.String("from", tx.From.String()))
-	// 		return false
-	// 	}
-
-	// 	//2、检查to
-	// 	if !tx.To.Verify() {
-	// 		logger.Info("faile to verify address", zap.String("to", tx.To.String()))
-	// 		return false
-	// 	}
-
-	// 	//3、检查nonce
-	// 	nonce, err := bc.GetNonce(tx.From.Bytes())
-	// 	if err != nil {
-	// 		logger.Error("failed to get nonce", zap.Error(err), zap.String("from", tx.From.String()))
-	// 		return false
-	// 	}
-
-	// 	if tx.Nonce < nonce {
-	// 		logger.Info("failed to verify nonce", zap.String("from", tx.From.String()),
-	// 			zap.Uint64("transaction nonce", tx.Nonce), zap.Uint64("nonce", nonce))
-	// 		return false
-	// 	}
-
-	// 	//4、检查to余额
-	// 	balance, err := bc.GetBalance(tx.To.Bytes())
-	// 	if err != nil {
-	// 		logger.Error("failed to get balance", zap.Error(err), zap.String("to", tx.To.String()))
-	// 		return false
-	// 	}
-	// 	freezeBal, err := bc.GetFreezeBalance(tx.To.Bytes())
-	// 	if err != nil {
-	// 		logger.Error("failed to get freezebalance", zap.Error(err), zap.String("to", tx.To.String()))
-	// 	}
-	// 	if tx.Amount < MinAmount || tx.Amount+freezeBal > balance {
-	// 		logger.Info("failed to verify amount", zap.String("to", tx.To.String()),
-	// 			zap.String("to", tx.To.String()), zap.Uint64("amount", tx.Amount), zap.Uint64("unlockbalance", balance))
-	// 		return false
-	// 	}
-
-	// 	//5、验证签名
-	// 	if !tx.Verify() {
-	// 		logger.Info("failed to verify transaction",
-	// 			zap.String("from", tx.From.String()), zap.String("to", tx.To.String()), zap.Uint64("amount", tx.Amount))
-	// 		return false
-	// 	}
-	// } else if tx.IsUnfreezeTransaction() {
-	// 	//1、检查from
-	// 	if !tx.From.Verify() {
-	// 		logger.Info("faile to verify address", zap.String("from", tx.From.String()))
-	// 		return false
-	// 	}
-
-	// 	//2、检查to
-	// 	if !tx.To.Verify() {
-	// 		logger.Info("faile to verify address", zap.String("to", tx.To.String()))
-	// 		return false
-	// 	}
-
-	// 	//3、检查nonce
-	// 	nonce, err := bc.GetNonce(tx.From.Bytes())
-	// 	if err != nil {
-	// 		logger.Error("failed to get nonce", zap.Error(err), zap.String("from", tx.From.String()))
-	// 		return false
-	// 	}
-
-	// 	if tx.Nonce < nonce {
-	// 		logger.Info("failed to verify nonce", zap.String("from", tx.From.String()),
-	// 			zap.Uint64("transaction nonce", tx.Nonce), zap.Uint64("nonce", nonce))
-	// 		return false
-	// 	}
-
-	// 	//4、检查to余额
-	// 	frozenBal, err := bc.GetFreezeBalance(tx.To.Bytes())
-	// 	if err != nil {
-	// 		logger.Error("failed to get frozen balance", zap.Error(err), zap.String("to", tx.To.String()))
-	// 	}
-
-	// 	if tx.Amount < MinAmount || tx.Amount > frozenBal {
-	// 		logger.Info("failed to verify amount", zap.String("to", tx.To.String()), zap.String("to", tx.To.String()),
-	// 			zap.Uint64("amount", tx.Amount), zap.Uint64("frozen balance", frozenBal))
-	// 		return false
-	// 	}
-
-	// 	//5、验证签名
-	// 	if !tx.Verify() {
-	// 		logger.Info("failed to verify transaction",
-	// 			zap.String("from", tx.From.String()), zap.String("to", tx.To.String()), zap.Uint64("amount", tx.Amount))
-	// 		return false
-	// 	}
-	// } else {
-	// 	//1、检查from
-	// 	if !tx.From.Verify() {
-	// 		logger.Info("faile to verify address", zap.String("from", tx.From.String()))
-	// 		return false
-	// 	}
-
-	// 	//2、检查to
-	// 	if !tx.To.Verify() {
-	// 		logger.Info("failed to verify address", zap.String("to", tx.To.String()))
-	// 		return false
-	// 	}
-
-	// 	//3、检查nonce
-	// 	nonce, err := bc.GetNonce(tx.From.Bytes())
-	// 	if err != nil {
-	// 		logger.Error("failed to get nonce", zap.Error(err), zap.String("from", tx.From.String()))
-	// 		return false
-	// 	}
-
-	// 	if tx.Nonce < nonce {
-	// 		logger.Info("failed to verify nonce", zap.String("from", tx.From.String()),
-	// 			zap.Uint64("transaction nonce", tx.Nonce), zap.Uint64("nonce", nonce))
-	// 		return false
-	// 	}
-
-	// 	//4、检查from余额
-	// 	balance, err := bc.GetBalance(tx.From.Bytes())
-	// 	if err != nil {
-	// 		logger.Error("failed to get balance", zap.Error(err), zap.String("from", tx.From.String()))
-	// 		return false
-	// 	}
-	// 	freezeBal, err := bc.GetFreezeBalance(tx.From.Bytes())
-	// 	if err != nil {
-	// 		logger.Error("failed to get freezeBal", zap.Error(err), zap.String("from", tx.From.String()))
-	// 		return false
-	// 	}
-	// 	unLockBal := balance - freezeBal
-	// 	if tx.Amount < MinAmount || tx.Amount > unLockBal {
-	// 		logger.Info("failed to verify amount", zap.String("from", tx.From.String()),
-	// 			zap.String("to", tx.To.String()), zap.Uint64("amount", tx.Amount), zap.Uint64("unlockbalance", unLockBal))
-	// 		return false
-	// 	}
-
-	// 	if tx.IsTokenTransaction() && (tx.Fee < MinAmount || tx.Fee+tx.Amount > unLockBal) {
-	// 		return false
-	// 	}
-
-	// 	//5、验证签名
-	// 	if !tx.Verify() {
-	// 		logger.Info("failed to verify transaction",
-	// 			zap.String("from", tx.From.String()), zap.String("to", tx.To.String()), zap.Uint64("amount", tx.Amount))
-	// 		return false
-	// 	}
-
-	// 	//6、检查order
-	// 	if tx.IsOrderTransaction() {
-	// 		ok := ed25519.Verify(ed25519.PublicKey(QTJPubKey), tx.Order.Hash, tx.Order.Signature)
-	// 		if ok != true {
-	// 			logger.Info("failed to verify order", zap.String("id", string(tx.Order.ID)))
-	// 			return false
-	// 		}
-	// 	}
-	// }
 
 	//1、检查from
 	if !tx.IsCoinBaseTransaction() && !tx.From.Verify() {
@@ -387,7 +279,7 @@ func verify(tx transaction.Transaction, bc blockchain.Blockchains) bool {
 	}
 
 	//2、检查to
-	if !tx.To.Verify() {
+	if !tx.IsConvertKtoTransaction() && !tx.IsConvertPckTransaction() && !tx.To.Verify() {
 		logger.Info("faile to verify address", zap.String("to", tx.To.String()))
 		return false
 	}
@@ -408,13 +300,21 @@ func verify(tx transaction.Transaction, bc blockchain.Blockchains) bool {
 	}
 
 	//4、验证签名
-	if !tx.IsCoinBaseTransaction() && !tx.Verify() {
+	if !tx.IsCoinBaseTransaction() && !tx.IsConvertKtoTransaction() && !tx.IsConvertPckTransaction() && !tx.Verify() {
 		logger.Info("failed to verify transaction", zap.String("from", tx.From.String()),
 			zap.String("to", tx.To.String()), zap.Uint64("amount", tx.Amount))
+		return false
+	} else if (tx.IsConvertKtoTransaction() || tx.IsConvertPckTransaction()) && !tx.ConvertVerify() {
+		logger.Info("failed to verify transaction", zap.String("to", tx.To.String()),
+			zap.Uint64("kto", tx.KtoNum), zap.Uint64("pck", tx.PckNum))
 		return false
 	}
 
 	//5、检查余额
+	if tx.IsCoinBaseTransaction() {
+		return true
+	}
+
 	if tx.IsFreezeTransaction() {
 		//检查to的可用余额
 		balance, err := bc.GetBalance(tx.To.Bytes())
@@ -425,9 +325,9 @@ func verify(tx transaction.Transaction, bc blockchain.Blockchains) bool {
 		frozenBal, err := bc.GetFreezeBalance(tx.To.Bytes())
 		if err != nil {
 			logger.Error("failed to get freezebalance", zap.Error(err), zap.String("to", tx.To.String()))
+			return false
 		}
 		if tx.Amount < MinAmount || util.Uint64SubOverflow(balance, frozenBal, tx.Amount) {
-			//if tx.Amount < MinAmount || tx.Amount+frozenBal > balance {
 			logger.Info("failed to verify amount", zap.String("to", tx.To.String()),
 				zap.String("to", tx.To.String()), zap.Uint64("amount", tx.Amount), zap.Uint64("avaliable balance", balance-frozenBal))
 			return false
@@ -437,14 +337,15 @@ func verify(tx transaction.Transaction, bc blockchain.Blockchains) bool {
 		frozenBal, err := bc.GetFreezeBalance(tx.To.Bytes())
 		if err != nil {
 			logger.Error("failed to get freezebalance", zap.Error(err), zap.String("to", tx.To.String()))
+			return false
 		}
+
 		if tx.Amount < MinAmount || util.Uint64SubOverflow(frozenBal, tx.Amount) {
-			//if tx.Amount < MinAmount || tx.Amount > frozenBal {
 			logger.Info("failed to verify amount", zap.String("to", tx.To.String()),
 				zap.String("to", tx.To.String()), zap.Uint64("amount", tx.Amount), zap.Uint64("frozen balance", frozenBal))
 			return false
 		}
-	} else if tx.IsTransferTrasnaction() {
+	} else {
 		//检查from的可用余额
 		balance, err := bc.GetBalance(tx.From.Bytes())
 		if err != nil {
@@ -457,19 +358,44 @@ func verify(tx transaction.Transaction, bc blockchain.Blockchains) bool {
 			return false
 		}
 
-		if tx.Amount < MinAmount || util.Uint64SubOverflow(balance, frozenBal, tx.Amount, tx.Fee) {
-			logger.Info("failed to verify amount", zap.String("from", tx.From.String()), zap.String("to", tx.To.String()),
-				zap.Uint64("amount", tx.Amount), zap.Uint64("unlockbalance", balance-frozenBal))
-			return false
-		}
+		if tx.IsTransferTrasnaction() {
+			if tx.Amount < MinAmount || util.Uint64SubOverflow(balance, frozenBal, tx.Amount, tx.Fee) {
+				logger.Info("failed to verify amount", zap.String("from", tx.From.String()), zap.String("to", tx.To.String()),
+					zap.Uint64("amount", tx.Amount), zap.Uint64("unlockbalance", balance-frozenBal))
+				return false
+			}
 
-		if tx.IsTokenTransaction() && (tx.Fee < MinAmount || util.Uint64SubOverflow(balance, frozenBal, tx.Amount, tx.Fee)) {
-			return false
+			if tx.IsTokenTransaction() && (tx.Fee < MinAmount || util.Uint64SubOverflow(balance, frozenBal, tx.Amount, tx.Fee)) {
+				return false
+			}
+		} else if tx.IsConvertKtoTransaction() {
+			pckBal, err := bc.GetPck(tx.From.Bytes())
+			if err != nil {
+				logger.Error("failed to verify pck", zap.Error(err))
+				return false
+			}
+
+			dktoBal, err := bc.GetDKto(tx.From.Bytes())
+			if err != nil {
+				logger.Error("failed to verify pck", zap.Error(err))
+				return false
+			}
+
+			if pckBal < tx.PckNum || dktoBal < tx.KtoNum {
+				logger.Error("failed to verify pck")
+				return false
+			}
+		} else if tx.IsConvertPckTransaction() {
+			if util.Uint64SubOverflow(balance, frozenBal, tx.KtoNum) {
+				logger.Error("failed to verify pck", zap.Uint64("bal", balance), zap.Uint64("freBal", frozenBal), zap.Uint64("kto", tx.KtoNum))
+				return false
+			}
 		}
-	} else if !tx.IsCoinBaseTransaction() {
-		logger.Error("wrong transaction type", zap.Int32("tag", tx.Tag))
-		return false
 	}
+	// else if !tx.IsCoinBaseTransaction() {
+	// 	logger.Error("wrong transaction type", zap.Int32("tag", tx.Tag))
+	// 	return false
+	// }
 
 	return true
 }
